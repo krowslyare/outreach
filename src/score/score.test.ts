@@ -29,15 +29,40 @@ function enriched(overrides: Partial<EnrichedProspect> = {}): EnrichedProspect {
 }
 
 describe("scoreProspect", () => {
-  it("suma señales, limita el score a 100 y mantiene elegible al prospecto", () => {
+  it("suma señales y limita el score a 100", () => {
     const result = scoreProspect(enriched());
+
+    expect(result.score).toBe(100);
+    expect(result.signals.map((signal) => signal.points)).toEqual([
+      40, 20, 20, 8, 12,
+    ]);
+  });
+
+  it("no habilita el contacto mientras no se verifique la ausencia de web", () => {
+    // Que Places no traiga websiteUri es un dato ausente, no una prueba. La
+    // señal suma para priorizar, pero el prospecto no es contactable hasta que
+    // alguien confirme: escribirle "vi que no tienes web" a quien sí la tiene
+    // quema el prospecto y el pitch de una sola vez.
+    const result = scoreProspect(enriched());
+
+    expect(result.score).toBe(100);
+    expect(result.eligible).toBe(false);
+    expect(result.blockers).toContain("falta verificar que realmente no tiene web");
+  });
+
+  it("habilita el contacto cuando la ausencia de web está verificada", () => {
+    const base = enriched();
+    const result = scoreProspect({
+      ...base,
+      web: { ...base.web, verificadoSinWeb: true },
+    });
 
     expect(result.score).toBe(100);
     expect(result.eligible).toBe(true);
     expect(result.blockers).toEqual([]);
-    expect(result.signals.map((signal) => signal.points)).toEqual([
-      40, 20, 20, 8, 12,
-    ]);
+    expect(result.signals.find((s) => s.name === "sin_web")?.detail).toContain(
+      "verificado",
+    );
   });
 
   it("bloquea un match de Places poco confiable aunque sigue scoreando", () => {
