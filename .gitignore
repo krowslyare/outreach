@@ -5,3 +5,8 @@ venv/
 .env
 .DS_Store
 ~$*.xlsx
+
+data_*.csv
+node_modules/
+.places-cache/
+.wwebjs_auth/
