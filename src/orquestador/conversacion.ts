@@ -5,8 +5,9 @@
 // real. Este módulo es el único lugar donde se juntan, y por eso concentra las
 // decisiones sobre qué puertas de seguridad aplican a una respuesta.
 
-import { decidirRespuesta, type ClienteClaude, type Turno } from "../agent/agent.js";
+import { decidirRespuesta, type Turno } from "../agent/agent.js";
 import { ejecutarHandoff, type HandoffDeps } from "../handoff/handoff.js";
+import type { ProveedorLLM } from "../llm/port.js";
 import { handleInbound } from "../wa/inbound.js";
 import { zonedParts } from "../wa/safety.js";
 import { CLASIFICACION_STUB_INBOUND, type Store } from "../wa/store.js";
@@ -32,7 +33,7 @@ export interface ConversacionDeps {
     | "recordOutboundLibre"
     | "setHumanTakeover"
   >;
-  cliente: ClienteClaude;
+  proveedor: ProveedorLLM;
   enviar(e164: string, texto: string): Promise<string>;
   handoff: Omit<HandoffDeps, "store" | "enviar">;
   config: SafetyConfig;
@@ -113,7 +114,7 @@ export async function manejarInbound(
 
   // El inbound ya quedó registrado en el paso 1, así que el último turno es el
   // del prospecto — que es justo lo que decidirRespuesta exige.
-  const decision = await decidirRespuesta(deps.cliente, ficha, historial);
+  const decision = await decidirRespuesta(deps.proveedor, ficha, historial);
 
   // 5. Escalar y perder van al handoff, que pone el lock antes de nada.
   if (decision.kind !== "responder") {

@@ -1,10 +1,13 @@
 import { describe, expect, it } from "vitest";
 
+import type {
+  ProveedorLLM,
+  RespuestaLLM,
+  SolicitudLLM,
+} from "../llm/port.js";
 import {
   decidirRespuesta,
   interpretar,
-  type ClienteClaude,
-  type RespuestaClaude,
   type Turno,
 } from "./agent.js";
 import type { ContextoProspecto } from "./prompt.js";
@@ -17,76 +20,97 @@ const prospecto: ContextoProspecto = {
   resenas: 42,
 };
 
-const respuestaTexto: RespuestaClaude = {
-  stop_reason: "end_turn",
-  content: [{ type: "text", text: "Respuesta del agente" }],
+const respuestaTexto: RespuestaLLM = {
+  corte: "fin",
+  texto: "Respuesta del agente",
+  herramienta: null,
 };
 
-function clienteCapturador(respuesta: RespuestaClaude = respuestaTexto): {
-  cliente: ClienteClaude;
-  params: () => Record<string, unknown>;
+function proveedorCapturador(respuesta: RespuestaLLM = respuestaTexto): {
+  proveedor: ProveedorLLM;
+  solicitud: () => SolicitudLLM;
 } {
-  let capturados: Record<string, unknown> | undefined;
+  let capturada: SolicitudLLM | undefined;
 
   return {
-    cliente: {
-      async crear(params) {
-        capturados = params;
+    proveedor: {
+      nombre: "fake",
+      async generar(solicitud) {
+        capturada = solicitud;
         return respuesta;
       },
     },
-    params() {
-      if (capturados === undefined) {
-        throw new Error("El cliente todavía no recibió parámetros");
+    solicitud() {
+      if (capturada === undefined) {
+        throw new Error("El proveedor todavía no recibió una solicitud");
       }
-      return capturados;
+      return capturada;
     },
   };
 }
 
 describe("interpretar", () => {
-  it("escala un refusal con content vacío sin lanzar", () => {
+  it("escala un rechazo sin lanzar", () => {
     expect(
       interpretar({
-        stop_reason: "refusal",
-        content: [],
+        corte: "rechazo",
+        texto: "",
+        herramienta: null,
       }),
     ).toEqual({
       kind: "escalar",
       motivo: "fuera_de_mi_alcance",
       resumen:
-        "Los clasificadores de seguridad rechazaron generar una respuesta. Requiere que lo revises a mano.",
+        "El proveedor rechazó generar una respuesta. Requiere revisión manual.",
     });
   });
 
-  it("incluye la categoría del refusal en el resumen", () => {
+  it("incluye el motivo del rechazo en el resumen", () => {
     const decision = interpretar({
-      stop_reason: "refusal",
-      stop_details: { category: "safety" },
-      content: [],
+      corte: "rechazo",
+      texto: "",
+      herramienta: null,
+      motivo: "clasificador de seguridad",
     });
 
     expect(decision).toMatchObject({
       kind: "escalar",
       motivo: "fuera_de_mi_alcance",
     });
-    expect(decision.kind === "escalar" && decision.resumen).toContain("safety");
+    expect(decision.kind === "escalar" && decision.resumen).toContain(
+      "clasificador de seguridad",
+    );
+  });
+
+  it("corte error escala en vez de responder", () => {
+    const decision = interpretar({
+      corte: "error",
+      texto: "",
+      herramienta: null,
+      motivo: "timeout del proveedor",
+    });
+
+    expect(decision).toMatchObject({
+      kind: "escalar",
+      motivo: "fuera_de_mi_alcance",
+    });
+    expect(decision.kind === "escalar" && decision.resumen).toContain(
+      "timeout del proveedor",
+    );
   });
 
   it("traduce escalar_a_humano conservando motivo y resumen", () => {
     expect(
       interpretar({
-        stop_reason: "tool_use",
-        content: [
-          {
-            type: "tool_use",
-            name: "escalar_a_humano",
-            input: {
-              motivo: "pide_reunion",
-              resumen: "Quiere coordinar una llamada para revisar el plan Empresa.",
-            },
+        corte: "fin",
+        texto: "",
+        herramienta: {
+          nombre: "escalar_a_humano",
+          input: {
+            motivo: "pide_reunion",
+            resumen: "Quiere coordinar una llamada para revisar el plan Empresa.",
           },
-        ],
+        },
       }),
     ).toEqual({
       kind: "escalar",
@@ -98,14 +122,12 @@ describe("interpretar", () => {
   it("traduce marcar_perdido conservando el motivo", () => {
     expect(
       interpretar({
-        stop_reason: "tool_use",
-        content: [
-          {
-            type: "tool_use",
-            name: "marcar_perdido",
-            input: { motivo: "ya_tiene_proveedor" },
-          },
-        ],
+        corte: "fin",
+        texto: "",
+        herramienta: {
+          nombre: "marcar_perdido",
+          input: { motivo: "ya_tiene_proveedor" },
+        },
       }),
     ).toEqual({ kind: "perdido", motivo: "ya_tiene_proveedor" });
   });
@@ -113,14 +135,12 @@ describe("interpretar", () => {
   it("usa defaults si el input de las herramientas está incompleto", () => {
     expect(
       interpretar({
-        stop_reason: "tool_use",
-        content: [
-          {
-            type: "tool_use",
-            name: "escalar_a_humano",
-            input: {},
-          },
-        ],
+        corte: "fin",
+        texto: "",
+        herramienta: {
+          nombre: "escalar_a_humano",
+          input: {},
+        },
       }),
     ).toEqual({
       kind: "escalar",
@@ -130,38 +150,35 @@ describe("interpretar", () => {
 
     expect(
       interpretar({
-        stop_reason: "tool_use",
-        content: [
-          {
-            type: "tool_use",
-            name: "marcar_perdido",
-            input: {},
-          },
-        ],
+        corte: "fin",
+        texto: "",
+        herramienta: {
+          nombre: "marcar_perdido",
+          input: {},
+        },
       }),
     ).toEqual({ kind: "perdido", motivo: "otro" });
   });
 
-  it("concatena los bloques de texto y recorta los extremos", () => {
+  it("recorta los extremos del texto", () => {
     expect(
       interpretar({
-        stop_reason: "end_turn",
-        content: [
-          { type: "text", text: "  Primera parte " },
-          { type: "text", text: "y segunda parte.  " },
-        ],
+        corte: "fin",
+        texto: "  Respuesta válida.  ",
+        herramienta: null,
       }),
     ).toEqual({
       kind: "responder",
-      texto: "Primera parte y segunda parte.",
+      texto: "Respuesta válida.",
     });
   });
 
   it("escala si el contenido de texto está en blanco", () => {
     expect(
       interpretar({
-        stop_reason: "end_turn",
-        content: [{ type: "text", text: " \n\t " }],
+        corte: "fin",
+        texto: " \n\t ",
+        herramienta: null,
       }),
     ).toMatchObject({
       kind: "escalar",
@@ -172,15 +189,12 @@ describe("interpretar", () => {
   it("ignora una herramienta desconocida cuando también hay texto", () => {
     expect(
       interpretar({
-        stop_reason: "tool_use",
-        content: [
-          {
-            type: "tool_use",
-            name: "herramienta_desconocida",
-            input: { dato: "irrelevante" },
-          },
-          { type: "text", text: "Respuesta válida" },
-        ],
+        corte: "fin",
+        texto: "Respuesta válida",
+        herramienta: {
+          nombre: "herramienta_desconocida",
+          input: { dato: "irrelevante" },
+        },
       }),
     ).toEqual({ kind: "responder", texto: "Respuesta válida" });
   });
@@ -188,188 +202,158 @@ describe("interpretar", () => {
 
 describe("decidirRespuesta", () => {
   it("lanza si el historial está vacío", async () => {
-    const { cliente } = clienteCapturador();
+    const { proveedor } = proveedorCapturador();
 
-    await expect(decidirRespuesta(cliente, prospecto, [])).rejects.toThrow(
+    await expect(decidirRespuesta(proveedor, prospecto, [])).rejects.toThrow(
       "el último turno sea del prospecto",
     );
   });
 
   it('lanza si el último turno es de "nosotros"', async () => {
-    const { cliente } = clienteCapturador();
+    const { proveedor } = proveedorCapturador();
 
     await expect(
-      decidirRespuesta(cliente, prospecto, [
+      decidirRespuesta(proveedor, prospecto, [
         { rol: "prospecto", texto: "Hola" },
         { rol: "nosotros", texto: "¿Cómo podemos ayudarle?" },
       ]),
     ).rejects.toThrow("el último turno sea del prospecto");
   });
 
-  it("no envía parámetros incompatibles con Opus 5", async () => {
-    const captura = clienteCapturador();
+  it("envía una solicitud neutral al proveedor", async () => {
+    const captura = proveedorCapturador();
 
-    await decidirRespuesta(captura.cliente, prospecto, [
+    await decidirRespuesta(captura.proveedor, prospecto, [
       { rol: "prospecto", texto: "Cuénteme más" },
     ]);
 
-    const params = captura.params();
-    // Esta lista explícita evita que una futura afinación silenciosa rompa la API con 400.
-    expect(params).not.toHaveProperty("temperature");
-    expect(params).not.toHaveProperty("top_p");
-    expect(params).not.toHaveProperty("top_k");
-    expect(params).not.toHaveProperty("thinking.budget_tokens");
-  });
-
-  it('usa exactamente el modelo "claude-opus-5"', async () => {
-    const captura = clienteCapturador();
-
-    await decidirRespuesta(captura.cliente, prospecto, [
-      { rol: "prospecto", texto: "Hola" },
-    ]);
-
-    expect(captura.params().model).toBe("claude-opus-5");
+    expect(captura.solicitud()).toEqual(
+      expect.objectContaining({
+        sistema: expect.any(String),
+        mensajes: expect.any(Array),
+        herramientas: expect.any(Array),
+        maxTokens: 8000,
+        esfuerzo: "high",
+      }),
+    );
+    expect(captura.solicitud()).not.toHaveProperty("model");
+    expect(captura.solicitud()).not.toHaveProperty("max_tokens");
+    expect(captura.solicitud()).not.toHaveProperty("output_config");
   });
 
   it("antepone el contexto del prospecto como mensaje user", async () => {
-    const captura = clienteCapturador();
+    const captura = proveedorCapturador();
 
-    await decidirRespuesta(captura.cliente, prospecto, [
+    await decidirRespuesta(captura.proveedor, prospecto, [
       { rol: "prospecto", texto: "Hola" },
     ]);
 
-    const messages = captura.params().messages as Array<{
-      role: string;
-      content: string;
-    }>;
-    expect(messages[0]).toMatchObject({ role: "user" });
-    expect(messages[0]?.content).toContain("<contexto_prospecto>");
+    expect(captura.solicitud().mensajes[0]).toMatchObject({ rol: "user" });
+    expect(captura.solicitud().mensajes[0]?.texto).toContain(
+      "<contexto_prospecto>",
+    );
   });
 
-  it("mapea el historial a roles de Claude y conserva el orden", async () => {
-    const captura = clienteCapturador();
+  it("mapea el historial a roles neutrales y conserva el orden", async () => {
+    const captura = proveedorCapturador();
     const historial: Turno[] = [
       { rol: "prospecto", texto: "Primer mensaje" },
       { rol: "nosotros", texto: "Nuestra respuesta" },
       { rol: "prospecto", texto: "Último mensaje" },
     ];
 
-    await decidirRespuesta(captura.cliente, prospecto, historial);
+    await decidirRespuesta(captura.proveedor, prospecto, historial);
 
-    const messages = captura.params().messages as Array<{
-      role: string;
-      content: string;
-    }>;
-    expect(messages.slice(1)).toEqual([
-      { role: "user", content: "Primer mensaje" },
-      { role: "assistant", content: "Nuestra respuesta" },
-      { role: "user", content: "Último mensaje" },
+    expect(captura.solicitud().mensajes.slice(1)).toEqual([
+      { rol: "user", texto: "Primer mensaje" },
+      { rol: "assistant", texto: "Nuestra respuesta" },
+      { rol: "user", texto: "Último mensaje" },
     ]);
-  });
-
-  it("marca el último bloque de system como cacheable", async () => {
-    const captura = clienteCapturador();
-
-    await decidirRespuesta(captura.cliente, prospecto, [
-      { rol: "prospecto", texto: "Hola" },
-    ]);
-
-    const system = captura.params().system as Array<Record<string, unknown>>;
-    expect(Array.isArray(system)).toBe(true);
-    expect(system.at(-1)).toMatchObject({
-      cache_control: { type: "ephemeral" },
-    });
   });
 
   it("usa effort high por default y respeta el override", async () => {
-    const defaultCapture = clienteCapturador();
-    await decidirRespuesta(defaultCapture.cliente, prospecto, [
+    const defaultCapture = proveedorCapturador();
+    await decidirRespuesta(defaultCapture.proveedor, prospecto, [
       { rol: "prospecto", texto: "Hola" },
     ]);
-    expect(defaultCapture.params().output_config).toEqual({ effort: "high" });
+    expect(defaultCapture.solicitud().esfuerzo).toBe("high");
 
-    const overrideCapture = clienteCapturador();
+    const overrideCapture = proveedorCapturador();
     await decidirRespuesta(
-      overrideCapture.cliente,
+      overrideCapture.proveedor,
       prospecto,
       [{ rol: "prospecto", texto: "Hola" }],
       { effort: "medium" },
     );
-    expect(overrideCapture.params().output_config).toEqual({
-      effort: "medium",
-    });
+    expect(overrideCapture.solicitud().esfuerzo).toBe("medium");
   });
 
-  it("usa max_tokens 8000 por default y respeta el override", async () => {
-    const defaultCapture = clienteCapturador();
-    await decidirRespuesta(defaultCapture.cliente, prospecto, [
+  it("usa maxTokens 8000 por default y respeta el override", async () => {
+    const defaultCapture = proveedorCapturador();
+    await decidirRespuesta(defaultCapture.proveedor, prospecto, [
       { rol: "prospecto", texto: "Hola" },
     ]);
-    expect(defaultCapture.params().max_tokens).toBe(8000);
+    expect(defaultCapture.solicitud().maxTokens).toBe(8000);
 
-    const overrideCapture = clienteCapturador();
+    const overrideCapture = proveedorCapturador();
     await decidirRespuesta(
-      overrideCapture.cliente,
+      overrideCapture.proveedor,
       prospecto,
       [{ rol: "prospecto", texto: "Hola" }],
       { maxTokens: 1234 },
     );
-    expect(overrideCapture.params().max_tokens).toBe(1234);
+    expect(overrideCapture.solicitud().maxTokens).toBe(1234);
   });
 
   it("declara solo las dos herramientas con esquemas estrictos", async () => {
-    const captura = clienteCapturador();
+    const captura = proveedorCapturador();
 
-    await decidirRespuesta(captura.cliente, prospecto, [
+    await decidirRespuesta(captura.proveedor, prospecto, [
       { rol: "prospecto", texto: "Hola" },
     ]);
 
-    const tools = captura.params().tools as Array<{
-      name: string;
-      strict: boolean;
-      input_schema: { additionalProperties: boolean };
-    }>;
-    expect(tools).toHaveLength(2);
-    expect(tools.map((tool) => tool.name)).toEqual([
+    const herramientas = captura.solicitud().herramientas;
+    expect(herramientas).toHaveLength(2);
+    expect(herramientas?.map((herramienta) => herramienta.nombre)).toEqual([
       "escalar_a_humano",
       "marcar_perdido",
     ]);
-    for (const tool of tools) {
-      expect(tool.strict).toBe(true);
-      expect(tool.input_schema.additionalProperties).toBe(false);
+    for (const herramienta of herramientas ?? []) {
+      expect(herramienta.descripcion).not.toBe("");
+      expect(herramienta.esquema).toMatchObject({
+        required: expect.any(Array),
+        additionalProperties: false,
+      });
     }
   });
 });
 
 describe("interpretar — regresiones del review", () => {
   it("no envía texto truncado por límite de tokens", () => {
-    // Con pensamiento adaptativo el presupuesto de salida se comparte, así que
-    // agotarlo devuelve texto no vacío pero cortado a media frase. Mandarlo se
-    // ve peor que no contestar y delata que hay un bot detrás.
+    const fragmento = "Claro, el plan Empresa + incluye aten";
     const decision = interpretar({
-      stop_reason: "max_tokens",
-      content: [{ type: "text", text: "Claro, el plan Empresa + incluye aten" }],
+      corte: "truncado",
+      texto: fragmento,
+      herramienta: null,
     });
 
     expect(decision.kind).toBe("escalar");
     if (decision.kind !== "escalar") throw new Error("esperaba escalar");
     expect(decision.resumen).toContain("truncó");
+    expect(decision.resumen).not.toContain(fragmento);
   });
 
-  it("el escalamiento gana cuando vienen varias herramientas", () => {
-    // "no me interesa, pero quiero hablar con Hideki" puede disparar las dos.
-    // Si ganara el orden del contenido, un marcar_perdido descartaría un pedido
-    // explícito de hablar con una persona.
+  it("el escalamiento gana al texto cuando viene la herramienta", () => {
     const decision = interpretar({
-      stop_reason: "tool_use",
-      content: [
-        { type: "tool_use", name: "marcar_perdido", input: { motivo: "no_interesa" } },
-        {
-          type: "tool_use",
-          name: "escalar_a_humano",
-          input: { motivo: "pide_humano", resumen: "Quiere hablar con Hideki." },
+      corte: "fin",
+      texto: "Texto que no debe enviarse",
+      herramienta: {
+        nombre: "escalar_a_humano",
+        input: {
+          motivo: "pide_humano",
+          resumen: "Quiere hablar con Hideki.",
         },
-      ],
+      },
     });
 
     expect(decision).toEqual({
@@ -377,16 +361,5 @@ describe("interpretar — regresiones del review", () => {
       motivo: "pide_humano",
       resumen: "Quiere hablar con Hideki.",
     });
-  });
-
-  it("sigue marcando perdido cuando esa es la única herramienta", () => {
-    const decision = interpretar({
-      stop_reason: "tool_use",
-      content: [
-        { type: "tool_use", name: "marcar_perdido", input: { motivo: "ya_tiene_proveedor" } },
-      ],
-    });
-
-    expect(decision).toEqual({ kind: "perdido", motivo: "ya_tiene_proveedor" });
   });
 });

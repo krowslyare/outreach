@@ -1,10 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
 
-import type {
-  ClienteClaude,
-  RespuestaClaude,
-} from "../agent/agent.js";
 import type { ContextoProspecto } from "../agent/prompt.js";
+import type { ProveedorLLM, RespuestaLLM } from "../llm/port.js";
 import type { AccountHealth, RecipientState } from "../wa/types.js";
 import {
   manejarInbound,
@@ -47,9 +44,10 @@ const SALUD: AccountHealth = {
   },
 };
 
-const RESPUESTA: RespuestaClaude = {
-  stop_reason: "end_turn",
-  content: [{ type: "text", text: "Claro, le cuento cómo funciona." }],
+const RESPUESTA: RespuestaLLM = {
+  corte: "fin",
+  texto: "Claro, le cuento cómo funciona.",
+  herramienta: null,
 };
 
 interface OpcionesDobles {
@@ -57,7 +55,7 @@ interface OpcionesDobles {
   inboundCreaStub?: boolean;
   estado?: Partial<RecipientState>;
   salud?: Partial<AccountHealth>;
-  respuesta?: RespuestaClaude;
+  respuesta?: RespuestaLLM;
   historial?: Array<{ direction: "in" | "out"; body: string }>;
   now?: Date;
 }
@@ -65,8 +63,8 @@ interface OpcionesDobles {
 function crearDobles(opciones: OpcionesDobles = {}) {
   const conversacion = [...(opciones.historial ?? [])];
   let ficha = opciones.ficha === undefined ? FICHA : opciones.ficha;
-  const crear = vi
-    .fn<ClienteClaude["crear"]>()
+  const generar = vi
+    .fn<ProveedorLLM["generar"]>()
     .mockResolvedValue(opciones.respuesta ?? RESPUESTA);
   const enviar = vi
     .fn<ConversacionDeps["enviar"]>()
@@ -111,7 +109,7 @@ function crearDobles(opciones: OpcionesDobles = {}) {
 
   const deps: ConversacionDeps = {
     store,
-    cliente: { crear },
+    proveedor: { nombre: "fake", generar },
     enviar,
     handoff: { numeroHumano: NUMERO_HUMANO },
     config: {
@@ -129,12 +127,12 @@ function crearDobles(opciones: OpcionesDobles = {}) {
     now: () => opciones.now ?? EN_HORARIO,
   };
 
-  return { deps, store, crear, enviar };
+  return { deps, store, generar, enviar };
 }
 
 describe("manejarInbound", () => {
   it("suprime un opt-out sin consultar al agente ni enviar", async () => {
-    const { deps, store, crear, enviar } = crearDobles();
+    const { deps, store, generar, enviar } = crearDobles();
     const info = vi.spyOn(console, "info").mockImplementation(() => undefined);
 
     await expect(
@@ -149,13 +147,13 @@ describe("manejarInbound", () => {
     expect(store.suppress).toHaveBeenCalledWith(E164, "opt-out detectado");
     // Un opt-out es una orden absoluta: ni siquiera debe llegar al componente
     // que podría producir texto para ese destinatario.
-    expect(crear).not.toHaveBeenCalled();
+    expect(generar).not.toHaveBeenCalled();
     expect(enviar).not.toHaveBeenCalled();
     info.mockRestore();
   });
 
   it("ignora un número sin ficha porque responder sin contexto sería improvisar", async () => {
-    const { deps, crear, enviar } = crearDobles({
+    const { deps, generar, enviar } = crearDobles({
       ficha: null,
       inboundCreaStub: true,
     });
@@ -167,12 +165,12 @@ describe("manejarInbound", () => {
       razon: "número fuera de la campaña",
     });
 
-    expect(crear).not.toHaveBeenCalled();
+    expect(generar).not.toHaveBeenCalled();
     expect(enviar).not.toHaveBeenCalled();
   });
 
   it("ignora una conversación con humanTakeover sin hablar encima de Hideki", async () => {
-    const { deps, crear, enviar } = crearDobles({
+    const { deps, generar, enviar } = crearDobles({
       estado: { humanTakeover: true },
     });
 
@@ -185,12 +183,12 @@ describe("manejarInbound", () => {
 
     // Esta ausencia de efectos es la garantía principal del takeover: el bot
     // no prepara ni manda una respuesta mientras la conversación es humana.
-    expect(crear).not.toHaveBeenCalled();
+    expect(generar).not.toHaveBeenCalled();
     expect(enviar).not.toHaveBeenCalled();
   });
 
   it("ignora un destinatario ya suprimido", async () => {
-    const { deps, crear, enviar } = crearDobles({
+    const { deps, generar, enviar } = crearDobles({
       estado: { suppressed: true },
     });
 
@@ -201,7 +199,7 @@ describe("manejarInbound", () => {
       razon: "destinatario suprimido",
     });
 
-    expect(crear).not.toHaveBeenCalled();
+    expect(generar).not.toHaveBeenCalled();
     expect(enviar).not.toHaveBeenCalled();
   });
 
@@ -288,17 +286,15 @@ describe("manejarInbound", () => {
   it("escala, activa takeover y avisa al número de Hideki", async () => {
     const { deps, store, enviar } = crearDobles({
       respuesta: {
-        stop_reason: "tool_use",
-        content: [
-          {
-            type: "tool_use",
-            name: "escalar_a_humano",
-            input: {
-              motivo: "pide_reunion",
-              resumen: "Quiere coordinar una llamada esta semana.",
-            },
+        corte: "fin",
+        texto: "",
+        herramienta: {
+          nombre: "escalar_a_humano",
+          input: {
+            motivo: "pide_reunion",
+            resumen: "Quiere coordinar una llamada esta semana.",
           },
-        ],
+        },
       },
     });
 
@@ -321,14 +317,12 @@ describe("manejarInbound", () => {
   it("marca perdido y suprime al prospecto sin enviar", async () => {
     const { deps, store, enviar } = crearDobles({
       respuesta: {
-        stop_reason: "tool_use",
-        content: [
-          {
-            type: "tool_use",
-            name: "marcar_perdido",
-            input: { motivo: "ya_tiene_proveedor" },
-          },
-        ],
+        corte: "fin",
+        texto: "",
+        herramienta: {
+          nombre: "marcar_perdido",
+          input: { motivo: "ya_tiene_proveedor" },
+        },
       },
     });
 
@@ -347,7 +341,7 @@ describe("manejarInbound", () => {
   });
 
   it("entrega el historial en orden y deja el inbound como último turno", async () => {
-    const { deps, crear } = crearDobles({
+    const { deps, generar } = crearDobles({
       historial: [
         { direction: "in", body: "Primer mensaje" },
         { direction: "out", body: "Nuestra respuesta" },
@@ -356,16 +350,14 @@ describe("manejarInbound", () => {
 
     await manejarInbound(deps, E164, "Último mensaje", EN_HORARIO);
 
-    const params = crear.mock.calls[0]?.[0];
-    const messages = params?.messages as
-      | Array<{ role: string; content: string }>
-      | undefined;
+    const solicitud = generar.mock.calls[0]?.[0];
+    const mensajes = solicitud?.mensajes;
     // El primer user es el contexto estructurado de la ficha; los siguientes
     // son la conversación y deben conservar dirección y orden cronológico.
-    expect(messages?.slice(1)).toEqual([
-      { role: "user", content: "Primer mensaje" },
-      { role: "assistant", content: "Nuestra respuesta" },
-      { role: "user", content: "Último mensaje" },
+    expect(mensajes?.slice(1)).toEqual([
+      { rol: "user", texto: "Primer mensaje" },
+      { rol: "assistant", texto: "Nuestra respuesta" },
+      { rol: "user", texto: "Último mensaje" },
     ]);
   });
 });
