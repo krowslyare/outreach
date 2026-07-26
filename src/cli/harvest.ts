@@ -9,6 +9,7 @@ import { DiskPlacesCache, enrichAll } from "../harvest/places.js";
 import {
   CLASIFICACIONES_MARGEN,
   DISTRITOS_LIMA_ALTO,
+  UBIGEO_LIMA,
   dedupeByMobile,
   filterProspects,
   filterSharedPhones,
@@ -44,8 +45,13 @@ const limit = parseLimit(process.argv.slice(2));
 const all = await loadRenipress(CSV);
 console.log(`filas parseadas: ${all.length}`);
 
+// --all-lima suelta la lista corta de 11 distritos, NO la geografía entera.
+// Sin el ubigeo, `districts: undefined` seleccionaba todo el Perú: el flag
+// mentía y, con --enrich, habría generado requests facturables a nivel
+// nacional mientras cada consulta seguía diciendo "Lima Perú".
 const selected = filterProspects(all, {
   districts: allLima ? undefined : DISTRITOS_LIMA_ALTO,
+  ubigeoPrefix: UBIGEO_LIMA,
   classifications: CLASIFICACIONES_MARGEN,
   requireMobile: true,
 });
@@ -107,16 +113,41 @@ if (shouldEnrich) {
           left.sourceId.localeCompare(right.sourceId),
       );
 
-    console.log("\ntop 20 por score:");
-    for (const prospect of scored.slice(0, 20)) {
-      const mobile =
-        prospect.phones.find((phone) => phone.kind === "mobile")?.e164 ?? "?";
-      const hasWebsite = prospect.web.websiteUri === null ? "no" : "sí";
-      console.log(
-        `  ${prospect.name.slice(0, 38).padEnd(40)} ` +
-          `${prospect.district.padEnd(18)} ${mobile.padEnd(14)} ` +
-          `web: ${hasWebsite.padEnd(2)} score: ${prospect.score}`,
+    // Contactables y bloqueados se muestran por separado. Mezclarlos ordenados
+    // solo por score hace que un registro de "revisar a mano" se lea como un
+    // lead listo — sobre todo cuando pocos matches superan el umbral de
+    // confianza y el listado se llena de ellos.
+    const contactables = scored.filter((p) => p.eligible);
+    const bloqueados = scored.filter((p) => !p.eligible);
+
+    const fila = (p: (typeof scored)[number]): string => {
+      const mobile = p.phones.find((phone) => phone.kind === "mobile")?.e164 ?? "?";
+      const conf = p.web.matchConfidence.toFixed(2);
+      return (
+        `  ${p.name.slice(0, 34).padEnd(36)} ${p.district.padEnd(18)} ` +
+        `${mobile.padEnd(14)} conf: ${conf}  score: ${String(p.score).padStart(3)}`
       );
+    };
+
+    console.log(`\ncontactables (${contactables.length}) — top 20 por score:`);
+    if (contactables.length === 0) {
+      console.log("  ninguno. Revisa los bloqueos de abajo.");
+    }
+    for (const p of contactables.slice(0, 20)) console.log(fila(p));
+
+    if (bloqueados.length > 0) {
+      const porMotivo = new Map<string, number>();
+      for (const p of bloqueados) {
+        for (const b of p.blockers) porMotivo.set(b, (porMotivo.get(b) ?? 0) + 1);
+      }
+      console.log(`\nbloqueados (${bloqueados.length}) — cola de revisión:`);
+      for (const [motivo, n] of [...porMotivo].sort((a, b) => b[1] - a[1])) {
+        console.log(`  ${String(n).padStart(4)}  ${motivo}`);
+      }
+      console.log("\n  primeros 5 por score:");
+      for (const p of bloqueados.slice(0, 5)) {
+        console.log(`${fila(p)}\n        → ${p.blockers.join("; ")}`);
+      }
     }
   }
 } else {
