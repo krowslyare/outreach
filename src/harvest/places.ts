@@ -93,6 +93,13 @@ interface PlacesSearchResponse {
   places?: PlaceCandidate[];
 }
 
+/**
+ * Confianza a partir de la cual se acepta que "Places no trae web" equivale a
+ * "no tiene web". Solo el camino de coordenadas la alcanza: Place a menos de
+ * 100 m del domicilio declarado más solape de nombre.
+ */
+export const CONFIANZA_VERIFICA_SIN_WEB = 0.95;
+
 interface SearchResult {
   candidates: PlaceCandidate[] | null;
   cacheable: boolean;
@@ -369,21 +376,42 @@ export async function enrichProspect(
     return { ...prospect, web };
   }
 
-  let best = search.candidates[0]!;
-  let confidence = matchConfidence(prospect, best);
-  for (const candidate of search.candidates.slice(1)) {
-    const candidateConfidence = matchConfidence(prospect, candidate);
+  const puntuados = search.candidates.map((candidate) => ({
+    candidate,
+    confidence: matchConfidence(prospect, candidate),
+  }));
+
+  let best = puntuados[0]!.candidate;
+  let confidence = puntuados[0]!.confidence;
+  for (const { candidate, confidence: candidateConfidence } of puntuados.slice(1)) {
     if (candidateConfidence > confidence) {
       best = candidate;
       confidence = candidateConfidence;
     }
   }
 
+  const websiteUri =
+    typeof best.websiteUri === "string" ? best.websiteUri : null;
+
+  // La selección conserva el primero ante empate, así que un candidato
+  // igual de confiable puede quedar fuera. Si ALGUNO de los empatados en la
+  // cima sí tiene web, la evidencia se contradice: no sabemos cuál de los dos
+  // es el negocio. Ahí no se verifica nada y va a revisión manual.
+  //
+  // Importa porque verificadoSinWeb es justo el flag que salta al humano: un
+  // falso positivo acá significa escribirle "vi que no tienes web" a alguien
+  // que sí la tiene, que es el error que este flag existe para evitar.
+  const empateConWeb = puntuados.some(
+    (p) =>
+      p.confidence === confidence &&
+      p.candidate !== best &&
+      typeof p.candidate.websiteUri === "string",
+  );
+
   const web: WebPresence = {
     checkedAt,
     placeId: typeof best.id === "string" ? best.id : null,
-    websiteUri:
-      typeof best.websiteUri === "string" ? best.websiteUri : null,
+    websiteUri,
     rating:
       typeof best.rating === "number" && Number.isFinite(best.rating)
         ? best.rating
@@ -394,6 +422,20 @@ export async function enrichProspect(
         ? best.userRatingCount
         : null,
     matchConfidence: confidence,
+    // Un match de este nivel solo se alcanza por el camino de coordenadas:
+    // el Place está a menos de 100 m del domicilio declarado en RENIPRESS Y
+    // el nombre solapa. A esa altura, que Places no traiga websiteUri se
+    // acepta como evidencia suficiente de que no hay sitio.
+    //
+    // No es una prueba —Places puede simplemente no tenerlo cargado— y por eso
+    // NO se aplica a los tramos de 0.80 ni 0.70, donde el match se sostiene
+    // solo en el nombre o en una distancia mayor. Es una decisión de negocio
+    // tomada con datos: en la calibración, el tramo 0.95 fue el único donde el
+    // match era inequívoco.
+    verificadoSinWeb:
+      confidence >= CONFIANZA_VERIFICA_SIN_WEB &&
+      websiteUri === null &&
+      !empateConWeb,
   };
 
   if (search.cacheable) {
