@@ -52,7 +52,19 @@ function titleCasePalabra(palabra: string): string {
     .join("-");
 }
 
+/**
+ * Una sigla escrita con puntos ("S.P.S", "E.I.R.L.") no debe pasar por el
+ * title case: sale "S.p.s", que se lee peor que el original. Se detectan por la
+ * forma —letras sueltas separadas por puntos— y se colapsan antes de titular.
+ */
+function colapsarSiglasPunteadas(valor: string): string {
+  return valor.replace(/\b(?:[A-Za-zÁÉÍÓÚÑ]\.){2,}/g, (sigla) =>
+    sigla.replace(/\./g, "").toUpperCase(),
+  );
+}
+
 export function normalizarNombre(raw: string): string {
+  raw = colapsarSiglasPunteadas(raw);
   const sinSufijo = quitarSufijosLegales(raw.replace(/\s+/g, " "));
   return sinSufijo
     .split(" ")

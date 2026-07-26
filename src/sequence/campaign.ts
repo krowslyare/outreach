@@ -140,6 +140,11 @@ export async function ejecutarTanda(
   // así que un tope basado en `enviados` no se alcanzaría nunca y la tanda
   // compondría contra toda la lista.
   let producidos = 0;
+  // Aperturas compuestas en ESTA tanda. aperturasRecientes solo conoce lo ya
+  // enviado, así que sin esto dos prospectos seguidos reciben la misma apertura
+  // — y en dry-run, donde no se persiste nada, el mecanismo de variedad no
+  // existía en absoluto.
+  const aperturasDeLaTanda: string[] = [];
   let candidatos = deps.store.candidatosParaContactar(TAMANO_PAGINA, desplazamiento);
   const resumen: ResumenTanda = {
     enviados: 0,
@@ -214,7 +219,10 @@ export async function ejecutarTanda(
     }
 
     const historialPrevio = deps.store.mensajesEnviados(candidato.e164);
-    const aperturasRecientes = deps.store.aperturasRecientes(15);
+    const aperturasRecientes = [
+      ...aperturasDeLaTanda,
+      ...deps.store.aperturasRecientes(15),
+    ];
     const composicion = await componerMensaje(
       deps.proveedor,
       contextoDe(ficha),
@@ -250,6 +258,7 @@ export async function ejecutarTanda(
         paso,
         texto: composicion.texto,
       });
+      aperturasDeLaTanda.unshift(composicion.texto.slice(0, 80));
       producidos += 1;
       continue;
     }
@@ -272,6 +281,7 @@ export async function ejecutarTanda(
       continue;
     }
 
+    aperturasDeLaTanda.unshift(composicion.texto.slice(0, 80));
     resumen.enviados += 1;
     producidos += 1;
     deps.log?.(`${candidato.e164} enviado (${paso})`);
