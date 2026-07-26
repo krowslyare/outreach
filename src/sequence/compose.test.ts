@@ -47,7 +47,7 @@ describe("componerMensaje", () => {
     });
 
     await expect(
-      componerMensaje(captura.proveedor, PROSPECTO, "first", []),
+      componerMensaje(captura.proveedor, PROSPECTO, "first", [], "busqueda", []),
     ).resolves.toEqual({ ok: true, texto: "Mensaje listo" });
 
     expect(captura.solicitud()).toMatchObject({
@@ -97,6 +97,8 @@ describe("componerMensaje", () => {
       PROSPECTO,
       "first",
       [],
+      "busqueda",
+      [],
     );
 
     expect(resultado.ok).toBe(false);
@@ -111,7 +113,7 @@ describe("componerMensaje", () => {
       herramienta: null,
     });
     await expect(
-      componerMensaje(vacio.proveedor, PROSPECTO, "first", []),
+      componerMensaje(vacio.proveedor, PROSPECTO, "first", [], "busqueda", []),
     ).resolves.toEqual({ ok: false, motivo: "el modelo no produjo texto" });
 
     const largo = proveedorCapturador({
@@ -123,6 +125,8 @@ describe("componerMensaje", () => {
       largo.proveedor,
       PROSPECTO,
       "first",
+      [],
+      "busqueda",
       [],
     );
     expect(resultado).toEqual({

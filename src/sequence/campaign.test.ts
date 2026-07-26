@@ -114,6 +114,10 @@ function fakeDeps(options: FakeOptions = {}): {
           resenas: 20,
         };
       },
+      // El compositor recibe aperturas recientes para no repetir la forma
+      // entre prospectos; el doble devuelve vacío porque cada test evalúa un
+      // aspecto distinto.
+      aperturasRecientes: () => [],
       mensajesEnviados: (e164) => {
         events.push(`historial:${e164}`);
         return [];

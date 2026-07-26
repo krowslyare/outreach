@@ -525,6 +525,34 @@ export class Store {
     return rows.map((r) => r.body);
   }
 
+  /**
+   * Aperturas de primeros contactos recientes, no de follow-ups.
+   *
+   * Se deriva por posición real en el historial en vez de confiar en la llave
+   * de idempotencia: así también representa salientes antiguos o importados
+   * que no necesariamente usaron el step `first`.
+   */
+  aperturasRecientes(limite: number): string[] {
+    const rows = this.db
+      .prepare(
+        `with salientes_ordenados as (
+           select id, e164, body, sent_at,
+                  row_number() over (
+                    partition by e164 order by sent_at asc, id asc
+                  ) as posicion
+           from messages
+           where direction = 'out' and sent_at is not null
+         )
+         select substr(body, 1, 80) as body
+         from salientes_ordenados
+         where posicion = 1
+         order by sent_at desc, id desc
+         limit ?`,
+      )
+      .all(limite) as Array<{ body: string }>;
+    return rows.map((row) => row.body);
+  }
+
   suppress(e164: string, reason: string): void {
     this.ensureInboundRecipient(e164, this.clock());
     this.db
