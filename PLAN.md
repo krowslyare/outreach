@@ -133,11 +133,11 @@ Embudo real sobre `RENIPRESS_2025_v2.csv` (25,986 filas):
 | Con teléfono | 16,058 (100%) |
 | Lima | 8,408 |
 | + clasificación de margen + 11 distritos altos | 2,502 |
-| **Con celular (WhatsApp-able)** | **996** |
-| Tras descartar gestores | **982** |
+| **Con celular (WhatsApp-able)** | **1,173** |
+| Tras descartar gestores y deduplicar | **1,150** |
 
 Los 1,426 restantes del segmento son fijos: no sirven. El titular de 2,502 era engañoso.
-A 15/día son ~65 días de pipeline. Ampliable soltando distritos (8,408 privados en Lima).
+A 15/día son ~77 días de pipeline. Ampliable soltando distritos (8,408 privados en Lima).
 
 **RUC 20: descartado para esta vertical.** RENIPRESS no trae RUC, y estar registrado
 como PRIVADO y activo es un filtro *más fuerte* que "es persona jurídica" — implica
@@ -147,7 +147,7 @@ fuzzy matching contra el padrón para agregar información que ya tenemos por ot
 **Teléfonos de gestores.** Un mismo celular aparecía en hasta **106 establecimientos**:
 son tramitadores que registran clínicas ajenas. Escribirles es inútil y se ve como spam.
 El conteo tiene que ser **nacional**: ese número daba 56 contando solo Lima. Topando en
-3 establecimientos se conservan 982 de 996 — cuesta 1.4% y limpia la lista.
+3 establecimientos el costo es ~2% de la lista y saca a los tramitadores.
 
 ## Fuentes
 
