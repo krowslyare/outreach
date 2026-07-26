@@ -480,6 +480,47 @@ export class Store {
       .run(e164, body, waMessageId, timestamp, timestamp);
   }
 
+  /**
+   * Candidatos a contactar, del mejor score al peor.
+   *
+   * Excluye suprimidos, conversaciones tomadas por un humano y a quien ya
+   * respondió: si alguien contestó, la cadencia automática se terminó y lo que
+   * corresponde es responderle, no seguir empujando la secuencia.
+   *
+   * Excluye también los stubs de inbound: nunca fueron prospectos de campaña.
+   */
+  candidatosParaContactar(
+    limite: number,
+  ): Array<{ e164: string; score: number | null }> {
+    return this.db
+      .prepare(
+        `select r.e164, r.score
+         from recipients r
+         where r.suppressed = 0
+           and r.human_takeover = 0
+           and r.source_id not like 'inbound:%'
+           and not exists (
+             select 1 from messages m
+             where m.e164 = r.e164 and m.direction = 'in'
+           )
+         order by r.score desc nulls last, r.e164 asc
+         limit ?`,
+      )
+      .all(limite) as Array<{ e164: string; score: number | null }>;
+  }
+
+  /** Los salientes ya enviados, en orden, para que el compositor no se repita. */
+  mensajesEnviados(e164: string): string[] {
+    const rows = this.db
+      .prepare(
+        `select body from messages
+         where e164 = ? and direction = 'out' and sent_at is not null
+         order by sent_at asc, id asc`,
+      )
+      .all(e164) as Array<{ body: string }>;
+    return rows.map((r) => r.body);
+  }
+
   suppress(e164: string, reason: string): void {
     this.ensureInboundRecipient(e164, this.clock());
     this.db
