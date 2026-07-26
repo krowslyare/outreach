@@ -3,7 +3,7 @@
 //   npm run campana -- --max 5 --dry-run
 //   npm run campana -- --max 5
 
-import { clienteAnthropic } from "../agent/cliente.js";
+import { crearProveedor } from "../llm/index.js";
 import { ejecutarTanda } from "../sequence/campaign.js";
 import { createWaClient, type WaClient } from "../wa/client.js";
 import { manejarInbound } from "../orquestador/conversacion.js";
@@ -54,8 +54,11 @@ function delay(milliseconds: number): Promise<void> {
 }
 
 const argumentos = parseArgs(process.argv.slice(2));
+const proveedor = crearProveedor();
+// Se anuncia antes de iniciar WhatsApp o componer mensajes para que el
+// operador pueda detener una ejecución apuntada al proveedor equivocado.
+console.info(`Proveedor LLM: ${proveedor.nombre}`);
 const store = new Store();
-const cliente = clienteAnthropic();
 // Número al que se escala. Sin esto el handoff no tiene a quién avisar, así que
 // se exige explícitamente en vez de fallar recién cuando alguien esté caliente.
 const numeroHumano = process.env.NUMERO_HUMANO?.trim();
@@ -98,7 +101,7 @@ try {
       void manejarInbound(
         {
           store,
-          cliente,
+          proveedor,
           enviar: (destino, texto) => waActivo.sendText(destino, texto),
           handoff: { numeroHumano },
           config: DEFAULT_SAFETY_CONFIG,
@@ -125,7 +128,7 @@ try {
   const resumen = await ejecutarTanda(
     {
       store,
-      cliente,
+      proveedor,
       client,
       config: DEFAULT_SAFETY_CONFIG,
       now: () => new Date(),

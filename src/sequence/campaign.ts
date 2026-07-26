@@ -1,5 +1,5 @@
-import type { ClienteClaude } from "../agent/agent.js";
 import type { ContextoProspecto } from "../agent/prompt.js";
+import type { ProveedorLLM } from "../llm/port.js";
 import type { WaClient } from "../wa/client.js";
 import { canContact, canSendNow, nextGapSeconds } from "../wa/safety.js";
 import { attemptSend } from "../wa/send.js";
@@ -51,7 +51,7 @@ type CampaignStore = Pick<
 
 export interface DependenciasCampana {
   store: CampaignStore;
-  cliente: ClienteClaude;
+  proveedor: ProveedorLLM;
   client: Pick<WaClient, "sendText">;
   config: SafetyConfig;
   now: () => Date;
@@ -113,10 +113,10 @@ function contextoDe(
 /**
  * Ejecuta una tanda serial de campaña.
  *
- * Las puertas se consultan antes del compositor porque cada llamada a Claude
- * cuesta dinero. `attemptSend` las repite luego: esa duplicación es deliberada,
- * ya que otro proceso puede cambiar la salud o el destinatario mientras se
- * compone el texto.
+ * Las puertas se consultan antes del compositor porque cada llamada al
+ * proveedor cuesta tiempo y dinero. `attemptSend` las repite luego: esa
+ * duplicación es deliberada, ya que otro proceso puede cambiar la salud o el
+ * destinatario mientras se compone el texto.
  */
 export async function ejecutarTanda(
   deps: DependenciasCampana,
@@ -158,11 +158,23 @@ export async function ejecutarTanda(
     const indiceCandidato = evaluados;
     evaluados += 1;
     const ahora = deps.now();
-    const veredictoCuenta = canSendNow(
-      deps.store.loadAccountHealth(ahora),
-      deps.config,
-      ahora,
-    );
+    const salud = deps.store.loadAccountHealth(ahora);
+    // En dry-run no se envía nada, así que las puertas que existen para
+    // proteger el número —horario hábil, tope diario, separación mínima— no
+    // deben impedir una previsualización. Bloquearlas haría que revisar los
+    // mensajes un domingo fuera imposible, que es justo cuando uno los revisa.
+    // El kill switch sí se respeta: si el número está quemado, no hay campaña
+    // que preparar.
+    const veredictoCuenta =
+      opts.dryRun === true
+        ? salud.killSwitch.tripped
+          ? {
+              allow: false as const,
+              reason: `kill switch activo: ${salud.killSwitch.reason ?? "sin detalle"}`,
+              retryAfter: null,
+            }
+          : { allow: true as const }
+        : canSendNow(salud, deps.config, ahora);
     if (!veredictoCuenta.allow) {
       // Una puerta de cuenta aplica a toda la tanda. Seguir recorriendo no
       // encontraría un destinatario distinto que pudiera saltársela.
@@ -204,7 +216,7 @@ export async function ejecutarTanda(
     const historialPrevio = deps.store.mensajesEnviados(candidato.e164);
     const aperturasRecientes = deps.store.aperturasRecientes(15);
     const composicion = await componerMensaje(
-      deps.cliente,
+      deps.proveedor,
       contextoDe(ficha),
       paso,
       historialPrevio,
