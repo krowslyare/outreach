@@ -53,9 +53,14 @@ export function auditarMensaje(
   }
 
   const mencionaPrecio =
-    /S\/\s*\d/iu.test(texto) ||
+    // "S/ 500" y también "S/. 500": el punto tras la barra es la forma más
+    // común de escribirlo en Perú y sin contemplarlo el precio se colaba.
+    /S\/\.?\s*\d/iu.test(texto) ||
+    // "soles 500" y "500 soles". El monto va antes tanto o más seguido que
+    // después, y solo se cubría un orden.
     /\bsoles\s*\d/iu.test(texto) ||
-    (/\bmensual\b/iu.test(texto) && /\d/u.test(texto));
+    /\d[\d.,]*\s*soles\b/iu.test(texto) ||
+    (/\bmensual(?:es|idad)?\b/iu.test(texto) && /\d/u.test(texto));
   if (mencionaPrecio) {
     motivos.push("menciona un precio en el primer contacto");
   }

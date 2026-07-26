@@ -85,3 +85,30 @@ describe("auditarMensaje", () => {
     ).toEqual({ ok: true });
   });
 });
+
+describe("formatos de precio peruanos", () => {
+  // Un precio colado en la apertura rompe la regla dura de no cotizar antes de
+  // que exista interés, así que la detección tiene que cubrir cómo se escribe
+  // de verdad en Perú, no solo la forma canónica.
+  it.each([
+    "Le dejo la web por S/. 500 al mes",
+    "Son 500 soles mensuales",
+    "Cuesta S/199",
+    "Serían 199 soles",
+    "La mensualidad es de 449",
+    "Son S/ 649 cada mes",
+  ])("rechaza el precio escrito como: %s", (texto) => {
+    const resultado = auditarMensaje(texto, CONTEXTO);
+    expect(resultado.ok).toBe(false);
+    if (resultado.ok) return;
+    expect(resultado.motivos.join(" ")).toMatch(/precio/i);
+  });
+
+  it("no confunde un número inocente con un precio", () => {
+    const resultado = auditarMensaje(
+      "Le escribo de Kurogrid. ¿Atienden en 2 sedes o solo en una?",
+      CONTEXTO,
+    );
+    expect(resultado.ok).toBe(true);
+  });
+});
