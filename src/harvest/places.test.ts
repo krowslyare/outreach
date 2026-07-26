@@ -170,3 +170,55 @@ describe("enrichProspect", () => {
     expect(enriched.web).toEqual(cached);
   });
 });
+
+describe("errores distinguibles de \"sin coincidencias\"", () => {
+  // Un fallo de API produce el mismo matchConfidence 0 que una búsqueda
+  // legítima sin resultados. Sin distinguirlos, una key mal configurada se lee
+  // como "el matching no sirve" y se termina culpando a la heurística en vez
+  // de revisar la consola de Google.
+  function errorResponse(status: number, message: string): Response {
+    return {
+      status,
+      text: async () => JSON.stringify({ error: { code: status, message } }),
+      json: async () => ({ error: { code: status, message } }),
+    } as Response;
+  }
+
+  it("un 403 deja el motivo en web.error, con el mensaje de Google", async () => {
+    const cache = new MemoryCache();
+    const fetchMock = vi
+      .fn<FetchLike>()
+      .mockResolvedValue(
+        errorResponse(403, "Places API (New) has not been used in project 1 before or it is disabled."),
+      );
+
+    const enriched = await enrichProspect(prospect(), {
+      apiKey: "k",
+      fetch: fetchMock,
+      cache,
+    });
+
+    expect(enriched.web.matchConfidence).toBe(0);
+    expect(enriched.web.error).toContain("HTTP 403");
+    expect(enriched.web.error).toContain("disabled");
+    // Un error de configuración se arregla: la próxima corrida debe reintentar,
+    // así que no se cachea.
+    expect(cache.values.size).toBe(0);
+  });
+
+  it("una búsqueda sin resultados NO deja error", async () => {
+    const cache = new MemoryCache();
+    const fetchMock = vi
+      .fn<FetchLike>()
+      .mockResolvedValue(response(200, { places: [] }));
+
+    const enriched = await enrichProspect(prospect(), {
+      apiKey: "k",
+      fetch: fetchMock,
+      cache,
+    });
+
+    expect(enriched.web.matchConfidence).toBe(0);
+    expect(enriched.web.error).toBeUndefined();
+  });
+});
