@@ -6,7 +6,7 @@
 import { clienteAnthropic } from "../agent/cliente.js";
 import { ejecutarTanda } from "../sequence/campaign.js";
 import { createWaClient, type WaClient } from "../wa/client.js";
-import { handleInbound } from "../wa/inbound.js";
+import { manejarInbound } from "../orquestador/conversacion.js";
 import { hardKill } from "../wa/safety.js";
 import { Store } from "../wa/store.js";
 import { DEFAULT_SAFETY_CONFIG } from "../wa/types.js";
@@ -55,6 +55,10 @@ function delay(milliseconds: number): Promise<void> {
 
 const argumentos = parseArgs(process.argv.slice(2));
 const store = new Store();
+const cliente = clienteAnthropic();
+// Número al que se escala. Sin esto el handoff no tiene a quién avisar, así que
+// se exige explícitamente en vez de fallar recién cuando alguien esté caliente.
+const numeroHumano = process.env.NUMERO_HUMANO?.trim();
 let wa: WaClient | null = null;
 
 try {
@@ -74,12 +78,40 @@ try {
     console.warn(
       "ATENCIÓN: MODO REAL. Esta ejecución enviará mensajes por WhatsApp.",
     );
+    if (numeroHumano === undefined || numeroHumano === "") {
+      throw new Error(
+        "Falta NUMERO_HUMANO (E.164). Es a donde se escala cuando un prospecto " +
+          "está listo; sin eso, una conversación caliente se perdería.",
+      );
+    }
     wa = createWaClient();
+    const waActivo = wa;
     wa.onAck((waMessageId, ack, at) => {
       store.recordAck(waMessageId, ack, at);
     });
     wa.onInbound((e164, body, at) => {
-      handleInbound({ store }, e164, body, at);
+      // Va al ORQUESTADOR, no a handleInbound. handleInbound solo registra y
+      // aplica el opt-out; manejarInbound es el único camino que llama al
+      // agente y ejecuta el handoff. Con el de bajo nivel, un prospecto que
+      // responde durante la tanda queda registrado y sin respuesta — y si
+      // quería contratar, sin escalar.
+      void manejarInbound(
+        {
+          store,
+          cliente,
+          enviar: (destino, texto) => waActivo.sendText(destino, texto),
+          handoff: { numeroHumano },
+          config: DEFAULT_SAFETY_CONFIG,
+          now: () => new Date(),
+          log: (mensaje) => console.log(`[inbound] ${mensaje}`),
+        },
+        e164,
+        body,
+        at,
+      ).catch((error: unknown) => {
+        // Un fallo atendiendo un inbound no debe tumbar la tanda saliente.
+        console.error(`[inbound] error atendiendo ${e164}:`, error);
+      });
     });
     wa.onFatal((reason) => {
       // Un fallo de autenticación o conflicto debe frenar cualquier intento
@@ -93,7 +125,7 @@ try {
   const resumen = await ejecutarTanda(
     {
       store,
-      cliente: clienteAnthropic(),
+      cliente,
       client,
       config: DEFAULT_SAFETY_CONFIG,
       now: () => new Date(),

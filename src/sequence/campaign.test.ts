@@ -87,12 +87,16 @@ function fakeDeps(options: FakeOptions = {}): {
 
   const deps: DependenciasCampana = {
     store: {
-      candidatosParaContactar: (limite) => {
-        events.push(`candidatos:${limite}`);
-        return e164s.slice(0, limite).map((e164, index) => ({
-          e164,
-          score: 100 - index,
-        }));
+      // El doble respeta el desplazamiento: el runner pagina, y un doble que
+      // ignore el offset devolvería la misma página para siempre.
+      candidatosParaContactar: (limite, desplazamiento = 0) => {
+        events.push(`candidatos:${limite}:${desplazamiento}`);
+        return e164s
+          .slice(desplazamiento, desplazamiento + limite)
+          .map((e164, index) => ({
+            e164,
+            score: 100 - (desplazamiento + index),
+          }));
       },
       loadAccountHealth: () => {
         events.push("account");
@@ -168,7 +172,7 @@ describe("ejecutarTanda", () => {
       "kill switch activo: pausado por seguridad",
     );
     expect(crear).not.toHaveBeenCalled();
-    expect(events).toEqual(["candidatos:20", "account"]);
+    expect(events).toEqual(["candidatos:100:0", "account"]);
   });
 
   it("salta al destinatario negado por canContact y sigue con el próximo", async () => {
@@ -273,7 +277,7 @@ describe("ejecutarTanda", () => {
     await ejecutarTanda(deps, { dryRun: true });
 
     expect(events.slice(0, 6)).toEqual([
-      "candidatos:20",
+      "candidatos:100:0",
       "account",
       "recipient:+51900000001",
       "ficha:+51900000001",
@@ -295,11 +299,49 @@ describe("ejecutarTanda", () => {
 
     const resumen = await ejecutarTanda(deps, { max: 2, dryRun: true });
 
-    expect(events[0]).toBe("candidatos:2");
+    expect(events[0]).toBe("candidatos:100:0");
     expect(crear).toHaveBeenCalledTimes(2);
     expect(resumen.mensajesCompuestos).toHaveLength(2);
-    expect(resumen.motivoTerminacion).toBe(
-      "tanda completada (2 candidatos evaluados)",
+    // Alcanzar el tope de la tanda es un motivo distinto a quedarse sin
+    // prospectos, y conviene poder distinguirlos al leer el resumen.
+    expect(resumen.motivoTerminacion).toBe("alcanzado el máximo de la tanda (2)");
+  });
+});
+
+describe("paginación de candidatos", () => {
+  it("no se queda atascado en los primeros por score cuando no son elegibles", async () => {
+    // La consulta ordena por score y no sabe de cadencia, así que los ya
+    // terminados y los que aún no les toca ocupan los primeros puestos. Sin
+    // paginar, esas filas coparían el cupo, canContact las saltaría a todas y
+    // ningún prospecto de score más bajo se contactaría jamás.
+    const bloqueados = Array.from(
+      { length: 120 },
+      (_, i) => `+5190000${String(i).padStart(4, "0")}`,
     );
+    const alcanzable = "+51999999999";
+    const antiguo = new Date(NOW.getTime() - 30 * 86_400_000);
+
+    const recipients: Record<string, ReturnType<typeof recipient>> = {};
+    for (const e of bloqueados) {
+      // followUpCount 2 = secuencia terminada; canContact los niega siempre.
+      recipients[e] = recipient(e, {
+        firstOutboundAt: antiguo,
+        lastOutboundAt: antiguo,
+        followUpCount: 2,
+      });
+    }
+    recipients[alcanzable] = recipient(alcanzable, {});
+
+    const { deps } = fakeDeps({
+      e164s: [...bloqueados, alcanzable],
+      recipients,
+      respuestas: [texto("Hola")],
+    });
+
+    const resumen = await ejecutarTanda(deps, { max: 1, dryRun: true });
+
+    expect(resumen.saltadosPorDestinatario).toBe(120);
+    expect(resumen.mensajesCompuestos).toHaveLength(1);
+    expect(resumen.mensajesCompuestos[0]?.e164).toBe(alcanzable);
   });
 });

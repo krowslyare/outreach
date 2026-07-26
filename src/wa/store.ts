@@ -491,6 +491,7 @@ export class Store {
    */
   candidatosParaContactar(
     limite: number,
+    desplazamiento = 0,
   ): Array<{ e164: string; score: number | null }> {
     return this.db
       .prepare(
@@ -504,9 +505,12 @@ export class Store {
              where m.e164 = r.e164 and m.direction = 'in'
            )
          order by r.score desc nulls last, r.e164 asc
-         limit ?`,
+         limit ? offset ?`,
       )
-      .all(limite) as Array<{ e164: string; score: number | null }>;
+      .all(limite, desplazamiento) as Array<{
+      e164: string;
+      score: number | null;
+    }>;
   }
 
   /** Los salientes ya enviados, en orden, para que el compositor no se repita. */

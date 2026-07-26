@@ -64,6 +64,12 @@ export interface DependenciasCampana {
  *
  * `firstOutboundAt` es lo que distingue los dos estados.
  */
+/**
+ * Cuántos candidatos se traen por página. Nada que ver con cuántos se envían:
+ * es solo el tamaño del barrido para no cargar los ~1,100 de una.
+ */
+const TAMANO_PAGINA = 100;
+
 function pasoPara(estado: {
   firstOutboundAt: Date | null;
   followUpCount: number;
@@ -97,7 +103,20 @@ export async function ejecutarTanda(
     throw new Error("max requiere un entero positivo");
   }
 
-  const candidatos = deps.store.candidatosParaContactar(max);
+  // Se pagina en vez de pedir `max` de una. La consulta ordena por score y no
+  // sabe de cadencia, así que los ya terminados (fu2 enviado) y los que
+  // todavía no les toca siguen ocupando los primeros puestos. Pidiendo solo
+  // `max`, esas filas coparían el cupo, canContact las saltaría a todas, y
+  // ningún prospecto de score más bajo se contactaría jamás — inanición
+  // permanente. La elegibilidad de cadencia vive en safety.ts y no se duplica
+  // en SQL: se recorre hasta juntar los envíos pedidos.
+  let desplazamiento = 0;
+  let evaluados = 0;
+  // Cuenta mensajes PRODUCIDOS, no solo enviados: en dry-run no se envía nada,
+  // así que un tope basado en `enviados` no se alcanzaría nunca y la tanda
+  // compondría contra toda la lista.
+  let producidos = 0;
+  let candidatos = deps.store.candidatosParaContactar(TAMANO_PAGINA, desplazamiento);
   const resumen: ResumenTanda = {
     enviados: 0,
     saltadosPorDestinatario: 0,
@@ -106,7 +125,13 @@ export async function ejecutarTanda(
     mensajesCompuestos: [],
   };
 
-  for (const [indice, candidato] of candidatos.entries()) {
+  while (candidatos.length > 0) {
+   for (const candidato of candidatos) {
+    if (producidos >= max) {
+      resumen.motivoTerminacion = `alcanzado el máximo de la tanda (${max})`;
+      return resumen;
+    }
+    evaluados += 1;
     const ahora = deps.now();
     const veredictoCuenta = canSendNow(
       deps.store.loadAccountHealth(ahora),
@@ -172,6 +197,7 @@ export async function ejecutarTanda(
         paso,
         texto: composicion.texto,
       });
+      producidos += 1;
       continue;
     }
 
@@ -194,16 +220,20 @@ export async function ejecutarTanda(
     }
 
     resumen.enviados += 1;
+    producidos += 1;
     deps.log?.(`${candidato.e164} enviado (${paso})`);
 
-    if (indice < candidatos.length - 1) {
+    if (producidos < max) {
       // El jitter evita una cadencia mecánica. No se duerme tras el último
       // candidato porque ya no existe otro envío de esta tanda que separar.
       await deps.sleep(nextGapSeconds(deps.config, deps.random) * 1_000);
     }
+   }
+
+   desplazamiento += candidatos.length;
+   candidatos = deps.store.candidatosParaContactar(TAMANO_PAGINA, desplazamiento);
   }
 
-  resumen.motivoTerminacion =
-    `tanda completada (${candidatos.length} candidatos evaluados)`;
+  resumen.motivoTerminacion = `tanda completada (${evaluados} candidatos evaluados)`;
   return resumen;
 }
