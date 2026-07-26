@@ -85,6 +85,14 @@ function localDayNumber(date: Date, timeZone: string): number {
  * antes de tocar la red es lo que hace que un reinicio sea conservador. Ante la
  * duda se pierde un mensaje; nunca se duplica frente al prospecto.
  */
+/**
+ * Tamaño por defecto de la ventana de deviceRate, en primeros mensajes ya
+ * maduros. A 15-20/día son unos 3-4 días: suficiente para que la muestra sea
+ * estable y corto para que una degradación reciente mueva la aguja en vez de
+ * diluirse en el histórico.
+ */
+export const VENTANA_DEVICE_RATE = 60;
+
 export class Store {
   private readonly db: InstanceType<typeof DatabaseSync>;
 
@@ -204,7 +212,15 @@ export class Store {
     };
   }
 
-  loadAccountHealth(now: Date): AccountHealth {
+  /**
+   * @param ventanaDeviceRate Cuántos primeros mensajes maduros entran al
+   * cálculo de deviceRate, empezando por los más recientes. Acotarlo es lo que
+   * hace que la señal sea de ventana y no acumulada de por vida.
+   */
+  loadAccountHealth(
+    now: Date,
+    ventanaDeviceRate: number = VENTANA_DEVICE_RATE,
+  ): AccountHealth {
     const state = this.db
       .prepare(
         `select campaign_started_at, kill_switch_tripped,
@@ -253,9 +269,19 @@ export class Store {
       )
       .all() as FirstMessageRow[];
     const cutoff = now.getTime() - 86_400_000;
-    const mature = firstMessages.filter(
-      (message) => new Date(message.sent_at).getTime() <= cutoff,
-    );
+    // La cohorte se acota a los más RECIENTES que ya maduraron. Sin tope
+    // superior, deviceRate se vuelve una tasa acumulada de por vida: un número
+    // que empieza a degradarse aporta demasiados pocos fallos como para mover
+    // un histórico grande y sano por debajo del umbral, y el kill switch nunca
+    // salta mientras el número se quema. La señal tiene que ser de ventana,
+    // como dice el contrato, no de siempre.
+    const mature = firstMessages
+      .filter((message) => new Date(message.sent_at).getTime() <= cutoff)
+      .sort(
+        (left, right) =>
+          new Date(right.sent_at).getTime() - new Date(left.sent_at).getTime(),
+      )
+      .slice(0, ventanaDeviceRate);
     const delivered = mature.filter(
       (message) => message.ack !== null && message.ack >= 2,
     ).length;
