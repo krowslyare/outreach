@@ -1,9 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
 
-import type {
-  ClienteClaude,
-  RespuestaClaude,
-} from "../agent/agent.js";
+import type { ProveedorLLM, RespuestaLLM } from "../llm/port.js";
 import type { RecipientState } from "../wa/types.js";
 import {
   DEFAULT_SAFETY_CONFIG,
@@ -45,10 +42,11 @@ function recipient(
   };
 }
 
-function texto(text: string): RespuestaClaude {
+function texto(text: string): RespuestaLLM {
   return {
-    stop_reason: "end_turn",
-    content: [{ type: "text", text }],
+    corte: "fin",
+    texto: text,
+    herramienta: null,
   };
 }
 
@@ -56,13 +54,13 @@ interface FakeOptions {
   e164s?: string[];
   health?: AccountHealth;
   recipients?: Record<string, RecipientState>;
-  respuestas?: RespuestaClaude[];
+  respuestas?: RespuestaLLM[];
 }
 
 function fakeDeps(options: FakeOptions = {}): {
   deps: DependenciasCampana;
   events: string[];
-  crear: ReturnType<typeof vi.fn<ClienteClaude["crear"]>>;
+  generar: ReturnType<typeof vi.fn<ProveedorLLM["generar"]>>;
   sendText: ReturnType<typeof vi.fn<(e164: string, body: string) => Promise<string>>>;
   sleeps: number[];
 } {
@@ -72,8 +70,8 @@ function fakeDeps(options: FakeOptions = {}): {
   const respuestas = [...(options.respuestas ?? [texto("Mensaje compuesto")])];
   let nextMessageId = 1;
 
-  const crear = vi.fn<ClienteClaude["crear"]>(async () => {
-    events.push("claude");
+  const generar = vi.fn<ProveedorLLM["generar"]>(async () => {
+    events.push("llm");
     const respuesta = respuestas.shift();
     if (respuesta === undefined) throw new Error("falta respuesta fake");
     return respuesta;
@@ -134,7 +132,7 @@ function fakeDeps(options: FakeOptions = {}): {
         events.push("tripKillSwitch");
       },
     },
-    cliente: { crear },
+    proveedor: { nombre: "fake", generar },
     client: { sendText },
     config: {
       ...DEFAULT_SAFETY_CONFIG,
@@ -150,12 +148,12 @@ function fakeDeps(options: FakeOptions = {}): {
     random: () => 0,
   };
 
-  return { deps, events, crear, sendText, sleeps };
+  return { deps, events, generar, sendText, sleeps };
 }
 
 describe("ejecutarTanda", () => {
   it("termina cuando canSendNow niega sin componer nada", async () => {
-    const { deps, events, crear } = fakeDeps({
+    const { deps, events, generar } = fakeDeps({
       e164s: ["+51900000001", "+51900000002"],
       health: health({
         killSwitch: {
@@ -171,14 +169,14 @@ describe("ejecutarTanda", () => {
     expect(resumen.motivoTerminacion).toBe(
       "kill switch activo: pausado por seguridad",
     );
-    expect(crear).not.toHaveBeenCalled();
+    expect(generar).not.toHaveBeenCalled();
     expect(events).toEqual(["candidatos:100:0", "account"]);
   });
 
   it("salta al destinatario negado por canContact y sigue con el próximo", async () => {
     const first = "+51900000001";
     const second = "+51900000002";
-    const { deps, crear, sendText } = fakeDeps({
+    const { deps, generar, sendText } = fakeDeps({
       e164s: [first, second],
       recipients: {
         [first]: recipient(first, { suppressed: true }),
@@ -190,7 +188,7 @@ describe("ejecutarTanda", () => {
 
     expect(resumen.saltadosPorDestinatario).toBe(1);
     expect(resumen.enviados).toBe(1);
-    expect(crear).toHaveBeenCalledTimes(1);
+    expect(generar).toHaveBeenCalledTimes(1);
     expect(sendText).toHaveBeenCalledOnce();
     expect(sendText).toHaveBeenCalledWith(second, "Mensaje compuesto");
   });
@@ -238,7 +236,11 @@ describe("ejecutarTanda", () => {
     const { deps, sendText } = fakeDeps({
       e164s: ["+51900000001", "+51900000002"],
       respuestas: [
-        { stop_reason: "refusal", content: [] },
+        {
+          corte: "rechazo",
+          texto: "",
+          herramienta: null,
+        },
         texto("Segundo sí compuesto"),
       ],
     });
@@ -282,12 +284,12 @@ describe("ejecutarTanda", () => {
       "recipient:+51900000001",
       "ficha:+51900000001",
       "historial:+51900000001",
-      "claude",
+      "llm",
     ]);
   });
 
   it("respeta max al pedir y procesar candidatos", async () => {
-    const { deps, events, crear } = fakeDeps({
+    const { deps, events, generar } = fakeDeps({
       e164s: [
         "+51900000001",
         "+51900000002",
@@ -300,7 +302,7 @@ describe("ejecutarTanda", () => {
     const resumen = await ejecutarTanda(deps, { max: 2, dryRun: true });
 
     expect(events[0]).toBe("candidatos:100:0");
-    expect(crear).toHaveBeenCalledTimes(2);
+    expect(generar).toHaveBeenCalledTimes(2);
     expect(resumen.mensajesCompuestos).toHaveLength(2);
     // Alcanzar el tope de la tanda es un motivo distinto a quedarse sin
     // prospectos, y conviene poder distinguirlos al leer el resumen.

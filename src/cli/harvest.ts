@@ -16,10 +16,14 @@ import {
   loadRenipress,
 } from "../harvest/renipress.js";
 import { scoreProspect } from "../score/score.js";
+import { Store } from "../wa/store.js";
 
 const CSV = "data_renipress_2025.csv";
 const allLima = process.argv.includes("--all-lima");
 const shouldEnrich = process.argv.includes("--enrich");
+// Sin esto el harvest calcula, imprime y tira todo: nada conectaba el
+// enriquecimiento con la base que lee la campaña.
+const shouldImport = process.argv.includes("--import");
 
 function parseLimit(args: string[]): number | undefined {
   const positionalIndex = args.indexOf("--limit");
@@ -151,6 +155,21 @@ if (shouldEnrich) {
         `${mobile.padEnd(14)} conf: ${conf}  score: ${String(p.score).padStart(3)}`
       );
     };
+
+    if (shouldImport) {
+      // importRecipients ya filtra por elegibilidad, así que un bloqueado no
+      // entra a la cola de envío ni por accidente.
+      const store = new Store();
+      try {
+        store.importRecipients(scored);
+        console.log(
+          `\nimportados al store: ${contactables.length} contactables ` +
+            `(los ${bloqueados.length} bloqueados NO entran a la cola)`,
+        );
+      } finally {
+        store.close();
+      }
+    }
 
     console.log(`\ncontactables (${contactables.length}) — top 20 por score:`);
     if (contactables.length === 0) {

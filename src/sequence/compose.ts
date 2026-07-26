@@ -7,13 +7,11 @@
 // compone individualmente en vez de rellenar una plantilla: una plantilla con
 // el nombre cambiado se detecta y se bloquea igual.
 
-import type { ClienteClaude } from "../agent/agent.js";
 import { catalogoParaPrompt } from "../agent/catalog.js";
 import type { ContextoProspecto } from "../agent/prompt.js";
+import type { Efuerzo, ProveedorLLM, SolicitudLLM } from "../llm/port.js";
 
 export type PasoCampana = "first" | "fu1" | "fu2";
-
-export const MODELO_COMPOSITOR = "claude-opus-5";
 
 const SISTEMA = `Escribes el primer mensaje de WhatsApp (y sus seguimientos) que Kurogrid, un estudio peruano de webs y sistemas, le manda a consultorios y clínicas privadas de Lima.
 
@@ -59,7 +57,7 @@ const INSTRUCCION_PASO: Record<PasoCampana, string> = {
 };
 
 export interface ComposeOpts {
-  effort?: "low" | "medium" | "high" | "xhigh" | "max";
+  effort?: Efuerzo;
   maxTokens?: number;
 }
 
@@ -75,7 +73,7 @@ export type ResultadoComposicion =
  * ni, peor, mandar algo a medias.
  */
 export async function componerMensaje(
-  cliente: ClienteClaude,
+  proveedor: ProveedorLLM,
   prospecto: ContextoProspecto,
   paso: PasoCampana,
   historialPrevio: readonly string[],
@@ -107,35 +105,39 @@ export async function componerMensaje(
     INSTRUCCION_PASO[paso],
   ].join("\n");
 
-  const respuesta = await cliente.crear({
-    model: MODELO_COMPOSITOR,
-    max_tokens: opts.maxTokens ?? 4000,
-    output_config: { effort: opts.effort ?? "high" },
-    system: [
-      {
-        type: "text",
-        text: SISTEMA,
-        // Idéntico entre prospectos, así que se cachea; el contexto va después.
-        cache_control: { type: "ephemeral" },
-      },
-    ],
-    messages: [{ role: "user", content: contexto }],
-  });
+  const solicitud: SolicitudLLM = {
+    sistema: SISTEMA,
+    mensajes: [{ rol: "user", texto: contexto }],
+    // No se declaran herramientas porque una composición solo admite texto
+    // listo para enviar; aceptar acciones acá mezclaría responsabilidades.
+    maxTokens: opts.maxTokens ?? 4000,
+    esfuerzo: opts.effort ?? "high",
+  };
+  const respuesta = await proveedor.generar(solicitud);
 
-  if (respuesta.stop_reason === "refusal") {
-    return { ok: false, motivo: "los clasificadores rechazaron la composición" };
+  if (respuesta.corte === "rechazo") {
+    return {
+      ok: false,
+      motivo:
+        "el proveedor rechazó la composición" +
+        (respuesta.motivo ? `: ${respuesta.motivo}` : ""),
+    };
   }
   // Un mensaje cortado a media frase no se manda. Delata al bot y desperdicia
   // el único primer contacto que existe con esa persona.
-  if (respuesta.stop_reason === "max_tokens") {
+  if (respuesta.corte === "truncado") {
     return { ok: false, motivo: "la composición se truncó por límite de tokens" };
   }
+  if (respuesta.corte === "error") {
+    return {
+      ok: false,
+      motivo:
+        "el proveedor falló al componer" +
+        (respuesta.motivo ? `: ${respuesta.motivo}` : " sin dar un motivo"),
+    };
+  }
 
-  const texto = respuesta.content
-    .filter((b) => b.type === "text")
-    .map((b) => b.text ?? "")
-    .join("")
-    .trim();
+  const texto = respuesta.texto.trim();
 
   if (texto.length === 0) {
     return { ok: false, motivo: "el modelo no produjo texto" };
