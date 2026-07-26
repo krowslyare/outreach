@@ -178,27 +178,56 @@ export function interpretar(respuesta: RespuestaClaude): AgentDecision {
     };
   }
 
+  // Se recorren TODAS las herramientas antes de decidir, no la primera que
+  // aparezca. Claude puede emitir varios tool_use en una respuesta, y un
+  // mensaje mixto como "no me interesa, pero quiero hablar con Hideki" satisface
+  // las dos. Si ganara el orden del contenido, un marcar_perdido podría
+  // descartar un pedido explícito de hablar con una persona — que es
+  // justamente el caso donde la regla dice escalar de inmediato.
+  let perdido: AgentDecision | null = null;
+
   for (const bloque of respuesta.content) {
     if (bloque.type !== "tool_use") continue;
     const input = (bloque.input ?? {}) as Record<string, unknown>;
 
     if (bloque.name === "escalar_a_humano") {
+      // El escalamiento domina cualquier otra decisión: el costo de escalar de
+      // más es una notificación; el de no escalar, un cliente perdido.
       return {
         kind: "escalar",
         motivo: String(input.motivo ?? "fuera_de_mi_alcance"),
         resumen: String(input.resumen ?? ""),
       };
     }
-    if (bloque.name === "marcar_perdido") {
-      return { kind: "perdido", motivo: String(input.motivo ?? "otro") };
+    if (bloque.name === "marcar_perdido" && perdido === null) {
+      perdido = { kind: "perdido", motivo: String(input.motivo ?? "otro") };
     }
   }
+
+  if (perdido !== null) return perdido;
 
   const texto = respuesta.content
     .filter((b) => b.type === "text")
     .map((b) => b.text ?? "")
     .join("")
     .trim();
+
+  // Un texto truncado NO se manda. Con pensamiento adaptativo el presupuesto de
+  // salida se comparte, así que agotarlo devuelve stop_reason "max_tokens" con
+  // texto no vacío pero cortado a media frase. Mandarle eso a un prospecto se
+  // ve peor que no contestar, y encima delata que hay un bot detrás.
+  if (respuesta.stop_reason === "max_tokens") {
+    return {
+      kind: "escalar",
+      motivo: "fuera_de_mi_alcance",
+      resumen:
+        "La respuesta se truncó por límite de tokens y no se envió. " +
+        (texto.length > 0
+          ? `Fragmento generado: "${texto.slice(0, 200)}"`
+          : "No alcanzó a generar texto.") +
+        " Conviene subir maxTokens o contestar a mano.",
+    };
+  }
 
   if (texto.length === 0) {
     // Sin texto y sin herramienta no hay nada que mandar. Escalar en vez de
