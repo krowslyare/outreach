@@ -4,6 +4,7 @@
   "private": true,
   "type": "module",
   "scripts": {
+    "harvest": "tsx src/cli/harvest.ts",
     "test": "vitest run",
     "test:watch": "vitest",
     "typecheck": "tsc --noEmit"
