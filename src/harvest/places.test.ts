@@ -222,3 +222,65 @@ describe("errores distinguibles de \"sin coincidencias\"", () => {
     expect(enriched.web.error).toBeUndefined();
   });
 });
+
+describe("verificación de ausencia de web por coordenadas", () => {
+  const placeCerca = (websiteUri?: string) => ({
+    id: "place-1",
+    displayName: { text: "Clínica Sonrisa Bella" },
+    location: { latitude: -12.0672, longitude: -77.0368 },
+    ...(websiteUri === undefined ? {} : { websiteUri }),
+  });
+
+  it("marca verificadoSinWeb en un match de 0.95 sin websiteUri", async () => {
+    // 0.95 solo se alcanza por coordenadas: Place a menos de 100 m del
+    // domicilio declarado Y solape de nombre. A esa altura se acepta que la
+    // ausencia del campo en Places equivale a no tener sitio.
+    const fetchMock = vi
+      .fn<FetchLike>()
+      .mockResolvedValue(response(200, { places: [placeCerca()] }));
+
+    const enriched = await enrichProspect(prospect(), {
+      apiKey: "k",
+      fetch: fetchMock,
+      cache: new MemoryCache(),
+    });
+
+    expect(enriched.web.matchConfidence).toBe(0.95);
+    expect(enriched.web.verificadoSinWeb).toBe(true);
+  });
+
+  it("NO lo marca en un match por solo nombre, aunque no haya websiteUri", async () => {
+    // Sin coordenadas el match se sostiene solo en el nombre y topa en 0.70.
+    // Ahí la ausencia del campo no alcanza como evidencia.
+    const fetchMock = vi.fn<FetchLike>().mockResolvedValue(
+      response(200, {
+        places: [{ id: "place-1", displayName: { text: "Clínica Sonrisa Bella" } }],
+      }),
+    );
+
+    const enriched = await enrichProspect(prospect({ lat: null, lng: null }), {
+      apiKey: "k",
+      fetch: fetchMock,
+      cache: new MemoryCache(),
+    });
+
+    expect(enriched.web.matchConfidence).toBe(0.7);
+    expect(enriched.web.verificadoSinWeb).toBe(false);
+  });
+
+  it("NO lo marca cuando el negocio SÍ tiene web", async () => {
+    const fetchMock = vi
+      .fn<FetchLike>()
+      .mockResolvedValue(
+        response(200, { places: [placeCerca("https://ejemplo.pe")] }),
+      );
+
+    const enriched = await enrichProspect(prospect(), {
+      apiKey: "k",
+      fetch: fetchMock,
+      cache: new MemoryCache(),
+    });
+
+    expect(enriched.web.verificadoSinWeb).toBe(false);
+  });
+});

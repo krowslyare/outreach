@@ -93,6 +93,13 @@ interface PlacesSearchResponse {
   places?: PlaceCandidate[];
 }
 
+/**
+ * Confianza a partir de la cual se acepta que "Places no trae web" equivale a
+ * "no tiene web". Solo el camino de coordenadas la alcanza: Place a menos de
+ * 100 m del domicilio declarado más solape de nombre.
+ */
+export const CONFIANZA_VERIFICA_SIN_WEB = 0.95;
+
 interface SearchResult {
   candidates: PlaceCandidate[] | null;
   cacheable: boolean;
@@ -379,11 +386,13 @@ export async function enrichProspect(
     }
   }
 
+  const websiteUri =
+    typeof best.websiteUri === "string" ? best.websiteUri : null;
+
   const web: WebPresence = {
     checkedAt,
     placeId: typeof best.id === "string" ? best.id : null,
-    websiteUri:
-      typeof best.websiteUri === "string" ? best.websiteUri : null,
+    websiteUri,
     rating:
       typeof best.rating === "number" && Number.isFinite(best.rating)
         ? best.rating
@@ -394,6 +403,18 @@ export async function enrichProspect(
         ? best.userRatingCount
         : null,
     matchConfidence: confidence,
+    // Un match de este nivel solo se alcanza por el camino de coordenadas:
+    // el Place está a menos de 100 m del domicilio declarado en RENIPRESS Y
+    // el nombre solapa. A esa altura, que Places no traiga websiteUri se
+    // acepta como evidencia suficiente de que no hay sitio.
+    //
+    // No es una prueba —Places puede simplemente no tenerlo cargado— y por eso
+    // NO se aplica a los tramos de 0.80 ni 0.70, donde el match se sostiene
+    // solo en el nombre o en una distancia mayor. Es una decisión de negocio
+    // tomada con datos: en la calibración, el tramo 0.95 fue el único donde el
+    // match era inequívoco.
+    verificadoSinWeb:
+      confidence >= CONFIANZA_VERIFICA_SIN_WEB && websiteUri === null,
   };
 
   if (search.cacheable) {
