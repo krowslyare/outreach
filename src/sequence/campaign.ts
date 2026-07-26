@@ -5,7 +5,13 @@ import { canContact, canSendNow, nextGapSeconds } from "../wa/safety.js";
 import { attemptSend } from "../wa/send.js";
 import type { Store } from "../wa/store.js";
 import type { SafetyConfig } from "../wa/types.js";
-import { componerMensaje, type PasoCampana } from "./compose.js";
+import { auditarMensaje } from "./auditoria.js";
+import {
+  componerMensaje,
+  type IntencionApertura,
+  type PasoCampana,
+} from "./compose.js";
+import { normalizarNombre, rubroNatural } from "./normalizar.js";
 
 const MAX_POR_DEFECTO = 20;
 
@@ -36,6 +42,7 @@ type CampaignStore = Pick<
   | "loadRecipientState"
   | "loadFichaProspecto"
   | "mensajesEnviados"
+  | "aperturasRecientes"
   | "claimSend"
   | "markSent"
   | "markError"
@@ -69,6 +76,19 @@ export interface DependenciasCampana {
  * es solo el tamaño del barrido para no cargar los ~1,100 de una.
  */
 const TAMANO_PAGINA = 100;
+const INTENCIONES_APERTURA: readonly IntencionApertura[] = [
+  "derivacion",
+  "busqueda",
+  "operativa",
+  "permiso",
+  "directa",
+];
+
+function intencionParaIndice(indice: number): IntencionApertura {
+  // La rotación depende de la posición estable en la tanda, no del azar. Así
+  // puede auditarse después y no produce cinco aperturas iguales por accidente.
+  return INTENCIONES_APERTURA[indice % INTENCIONES_APERTURA.length]!;
+}
 
 function pasoPara(estado: {
   firstOutboundAt: Date | null;
@@ -83,7 +103,11 @@ function pasoPara(estado: {
 function contextoDe(
   ficha: NonNullable<ReturnType<Store["loadFichaProspecto"]>>,
 ): ContextoProspecto {
-  return ficha;
+  return {
+    ...ficha,
+    nombre: normalizarNombre(ficha.nombre),
+    clasificacion: rubroNatural(ficha.clasificacion),
+  };
 }
 
 /**
@@ -131,6 +155,7 @@ export async function ejecutarTanda(
       resumen.motivoTerminacion = `alcanzado el máximo de la tanda (${max})`;
       return resumen;
     }
+    const indiceCandidato = evaluados;
     evaluados += 1;
     const ahora = deps.now();
     const veredictoCuenta = canSendNow(
@@ -176,11 +201,15 @@ export async function ejecutarTanda(
       continue;
     }
 
+    const historialPrevio = deps.store.mensajesEnviados(candidato.e164);
+    const aperturasRecientes = deps.store.aperturasRecientes(15);
     const composicion = await componerMensaje(
       deps.cliente,
       contextoDe(ficha),
       paso,
-      deps.store.mensajesEnviados(candidato.e164),
+      historialPrevio,
+      intencionParaIndice(indiceCandidato),
+      aperturasRecientes,
     );
     if (!composicion.ok) {
       resumen.fallosComposicion += 1;
@@ -190,10 +219,22 @@ export async function ejecutarTanda(
       continue;
     }
 
+    const auditoria = auditarMensaje(composicion.texto, {
+      clasificacion: ficha.clasificacion,
+      aperturasRecientes,
+    });
+    if (!auditoria.ok) {
+      resumen.fallosComposicion += 1;
+      deps.log?.(
+        `${candidato.e164} no pasó auditoría: ${auditoria.motivos.join("; ")}`,
+      );
+      continue;
+    }
+
     if (opts.dryRun === true) {
       resumen.mensajesCompuestos.push({
         e164: candidato.e164,
-        nombre: ficha.nombre,
+        nombre: normalizarNombre(ficha.nombre),
         paso,
         texto: composicion.texto,
       });

@@ -86,6 +86,42 @@ describe("Store", () => {
     );
   });
 
+  it("devuelve solo aperturas de primeros contactos, recientes y truncadas", () => {
+    let current = new Date("2026-07-24T15:00:00.000Z");
+    const store = new Store(":memory:", () => current);
+    stores.push(store);
+    store.importRecipients([
+      scored("A", "+51999111222"),
+      scored("B", "+51999222333"),
+      scored("C", "+51999333444"),
+    ]);
+
+    const enviar = (e164: string, step: "first" | "fu1", body: string) => {
+      const id = store.claimSend(e164, step, body);
+      if (id === null) throw new Error("claim inesperadamente duplicado");
+      store.markSent(id, `wa-${e164}-${step}`);
+    };
+
+    const aperturaA = "A".repeat(90);
+    enviar("+51999111222", "first", aperturaA);
+    current = new Date("2026-07-24T16:00:00.000Z");
+    enviar("+51999222333", "first", "Apertura B");
+    current = new Date("2026-07-24T17:00:00.000Z");
+    enviar("+51999222333", "fu1", "Follow-up B más reciente");
+    current = new Date("2026-07-24T18:00:00.000Z");
+    enviar("+51999333444", "first", "Apertura C");
+
+    expect(store.aperturasRecientes(3)).toEqual([
+      "Apertura C",
+      "Apertura B",
+      aperturaA.slice(0, 80),
+    ]);
+    expect(store.aperturasRecientes(2)).toEqual([
+      "Apertura C",
+      "Apertura B",
+    ]);
+  });
+
   it("calcula ACK_DEVICE solo sobre el primer mensaje maduro de cada destinatario", () => {
     let current = new Date("2026-07-24T15:00:00.000Z");
     const store = new Store(":memory:", () => current);

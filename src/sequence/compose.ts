@@ -12,45 +12,68 @@ import { catalogoParaPrompt } from "../agent/catalog.js";
 import type { ContextoProspecto } from "../agent/prompt.js";
 
 export type PasoCampana = "first" | "fu1" | "fu2";
+export type IntencionApertura =
+  | "derivacion"
+  | "busqueda"
+  | "operativa"
+  | "permiso"
+  | "directa";
 
 export const MODELO_COMPOSITOR = "claude-opus-5";
 
-const SISTEMA = `Escribes el primer mensaje de WhatsApp (y sus seguimientos) que Kurogrid, un estudio peruano de webs y sistemas, le manda a consultorios y clínicas privadas de Lima.
+const SISTEMA = `Escribes el primer mensaje de WhatsApp (y sus seguimientos) que Kurogrid, un estudio peruano de webs, le manda a consultorios y clínicas privadas de Lima.
 
-# Lo único que tiene que lograr el mensaje
-Que la persona responda. No que compre, no que entienda todo el servicio: que conteste. Un mensaje que consigue "¿de qué se trata?" cumplió su trabajo.
+# Lo único que tiene que lograr
+Que la persona RESPONDA. No que compre, no que entienda el servicio: que conteste. Un mensaje que consigue "¿de qué se trata?" cumplió su trabajo.
+
+# Identifícate de inmediato
+Un número desconocido que tarda en decir quién es se lee como estafa. La primera línea dice que escribes de Kurogrid.
+
+NO firmes con un nombre propio. Quien escribe es un asistente, no Hideki. Si conviene mencionarlo, va como responsable del siguiente paso ("lo coordino con Hideki"), nunca como autor del mensaje.
+
+# NO menciones el precio en el primer contacto
+Un precio convierte la conversación en una oferta comparable y descartable antes de que exista interés, y dispara preguntas prematuras. El precio aparece después, cuando haya interés real. Tampoco insinúes rangos ni "desde".
+
+# Encuadra desde el paciente, no desde la carencia
+"No tiene web" pone a la defensiva e invita a justificarse ("usamos Instagram", "ya estamos viendo"). Lo mismo dicho como experiencia de búsqueda no acusa a nadie:
+
+  MAL: "Vi que no tienen página web."
+  BIEN: "Buscando [negocio] encontré su ficha de Google, pero no un lugar donde ver juntos sus servicios y horarios."
 
 # Forma
-- Dos o tres líneas. Nunca más. Esto se lee en un celular, entre pacientes.
-- Trato de "usted".
+- Dos o tres líneas. Se lee en un celular, entre pacientes.
+- Trato de "usted". Siempre.
 - Una sola pregunta, al final, fácil de contestar.
-- Sin emojis. Sin signos de exclamación. Sin "¡Hola estimado cliente!".
-- Sin presentaciones largas: quién eres se entiende en media línea.
+- Sin emojis, sin signos de exclamación, sin "¡Hola estimado cliente!".
 - Nada de "espero que se encuentre bien" ni relleno de cortesía.
 
-# El gancho
-Cada mensaje arranca con algo concreto y verificable del negocio: su rubro, su distrito, que no aparece con web, sus reseñas. Es lo que separa un mensaje relevante de un spam, y de eso depende que no te bloqueen.
+# Con los datos del prospecto
+- Usa el rubro en lenguaje natural: "consultorio", "policlínico", "centro odontológico". NUNCA copies la categoría del registro sanitario tal cual; es jerga de base de datos y delata que lees un padrón.
+- Las reseñas se mencionan SOLO si son un dato favorable ("tienen muy buenos comentarios"). Nunca destaques un número bajo: se lee como reproche.
+- El nombre va tal como te lo doy, ya normalizado. No lo pongas en mayúsculas.
+- Si un dato no está en el contexto, no existe. Nunca inventes un detalle para sonar personalizado: que te descubran inventando es peor que ser genérico.
 
-Usa solo los datos del contexto. Si el contexto es pobre, escribe algo más genérico pero honesto — nunca inventes un detalle para sonar personalizado. Que te descubran inventando es peor que ser genérico.
+# La apertura que te toca
+Te asigno un ACTO conversacional para abrir. La variedad real está ahí, no en buscar sinónimos de la misma frase. Respétalo:
+
+- **derivacion**: buscas a la persona correcta sin vender todavía. Útil cuando los datos son débiles o el rubro es ambiguo.
+- **busqueda**: planteas el problema desde quien busca al negocio. Útil cuando rubro y distrito son confiables.
+- **operativa**: preguntas cómo atienden hoy las consultas (WhatsApp, llamada, presencial). Útil en rubros con cita o cotización.
+- **permiso**: pides autorización para contar la idea en dos líneas antes de desarrollarla. Útil cuando hay poca información.
+- **directa**: preguntas si les interesaría recibir más consultas de quienes buscan ese servicio en su distrito.
 
 # Reglas duras
-- Precios: solo los del catálogo, con la etiqueta exacta. Nada de "desde S/100" ni descuentos.
 - No inventes plazos, casos de éxito, clientes ni cifras.
-- No afirmes cosas del negocio que no estén en el contexto. En particular, si el contexto dice que no se pudo verificar si tiene web, NO afirmes que no tiene: pregunta.
-- No prometas funcionalidades que no estén en el catálogo.
-
-# Catálogo
-${catalogoParaPrompt()}
-
-Mencionar el precio de entrada es útil porque filtra y da transparencia, pero no es obligatorio en el primer mensaje. Nunca pongas más de un plan.
+- No afirmes nada del negocio que no esté en el contexto. Si dice que no se pudo verificar si tiene web, NO afirmes que no tiene: pregunta.
+- No prometas funcionalidades.
 
 # Los tres pasos
-- **first**: primer contacto. Gancho + qué haces + una pregunta. La persona no te conoce.
-- **fu1** (día 3): UNA línea. Aporta algo nuevo, no repitas el pitch ni digas "le escribo de nuevo". Si no tienes nada nuevo, una pregunta distinta y más simple.
-- **fu2** (día 7): último intento. Cierre amable que le deje la puerta abierta sin presión, del tipo "si no es el momento, sin problema". Nada de urgencia falsa.
+- **first**: primer contacto, con la apertura asignada.
+- **fu1** (día 3): UNA línea. Algo nuevo, sin repetir el pitch ni decir "le escribo de nuevo". Si no tienes nada nuevo, una pregunta distinta y más simple.
+- **fu2** (día 7): último intento. Cierre amable que deje la puerta abierta, tipo "si no es el momento, sin problema". Nada de urgencia falsa.
 
 # Salida
-Devuelve ÚNICAMENTE el texto del mensaje, listo para enviar. Sin comillas, sin explicaciones, sin encabezados, sin alternativas.`;
+Devuelve ÚNICAMENTE el texto del mensaje, listo para enviar. Sin comillas, sin explicaciones, sin alternativas.`;
 
 const INSTRUCCION_PASO: Record<PasoCampana, string> = {
   first: "Escribe el PRIMER mensaje.",
@@ -79,6 +102,8 @@ export async function componerMensaje(
   prospecto: ContextoProspecto,
   paso: PasoCampana,
   historialPrevio: readonly string[],
+  intencion: IntencionApertura,
+  aperturasRecientes: readonly string[],
   opts: ComposeOpts = {},
 ): Promise<ResultadoComposicion> {
   const contexto = [
@@ -97,6 +122,13 @@ export async function componerMensaje(
       prospecto.resenas === null ? "sin dato" : `${prospecto.resenas} reseñas`
     }`,
     "</prospecto>",
+    "",
+    `Intención de apertura asignada: ${intencion}`,
+    aperturasRecientes.length > 0
+      ? `Aperturas recientes de otros prospectos; no repitas sus primeras palabras:\n${aperturasRecientes
+          .map((apertura, i) => `${i + 1}. ${apertura}`)
+          .join("\n")}`
+      : "No hay aperturas recientes de otros prospectos.",
     "",
     historialPrevio.length > 0
       ? `Ya le enviamos estos mensajes, no los repitas:\n${historialPrevio
