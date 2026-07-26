@@ -149,6 +149,39 @@ son tramitadores que registran clínicas ajenas. Escribirles es inútil y se ve 
 El conteo tiene que ser **nacional**: ese número daba 56 contando solo Lima. Topando en
 3 establecimientos el costo es ~2% de la lista y saca a los tramitadores.
 
+## Calibración contra Places — medido, 2026-07-26
+
+Primera corrida real contra la API sobre 30 prospectos del segmento.
+
+| | de 30 | |
+|---|---|---|
+| Match confiable (≥0.6) | 17 | 57% |
+| **De esos, sin web** | **9** | **30%** |
+| Ya tienen web | 14 | 47% |
+| Sin match utilizable | 13 | 43% |
+
+**El embudo real es ~30%, no 100%.** De los 1,143 con celular quedan **~343**
+prospectos verificables y sin web: unos 23 días a 15/día. Suficiente para el
+piloto; bastante menos que la lista cruda.
+
+Distribución de confianza: 0.00→5, 0.20→7, 0.50→1, 0.70→12, 0.95→5.
+
+**Los umbrales quedan como están.** Los rechazos de 0.20 son correctos: dos
+médicos distintos matchearon el mismo placeId, que es justo el falso positivo
+que el umbral ataja. RENIPRESS registra a muchos profesionales bajo su nombre
+personal y Google los tiene bajo nombre comercial — el nombre no puede tender
+ese puente.
+
+**El cuello de botella son las coordenadas, no la heurística.** Los 7 rechazos
+de 0.20 tienen todos `coords: NO`; sin coordenadas el matching cae al camino de
+solo-nombre, que topa en 0.70. El 45% del segmento está así. Si se quiere subir
+la tasa, el lever es geocodificar, no aflojar umbrales.
+
+**Pendiente de decidir:** si un match de 0.95 (coordenadas a <100m + solape de
+nombre) alcanza para dar `verificadoSinWeb` por bueno. Hoy no se hace: que
+Places no traiga el campo sigue sin probar que no exista un sitio. Pero el
+riesgo en ese tramo es bastante menor que en un match de 0.70.
+
 ## Fuentes
 
 - **Google Places** (Text Search, field mask) — opera, teléfono, sin web, reseñas.

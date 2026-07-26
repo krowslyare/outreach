@@ -82,6 +82,17 @@ export interface WebPresence {
    * el pitch de una sola vez.
    */
   verificadoSinWeb?: boolean;
+  /**
+   * Por qué falló la consulta, cuando falló.
+   *
+   * Sin esto, un error de API produce exactamente el mismo resultado que una
+   * búsqueda sin coincidencias: `matchConfidence: 0`. Es una confusión cara —
+   * una key mal configurada se lee como "el matching no funciona" y se termina
+   * culpando a la heurística en vez de revisar la consola de Google.
+   *
+   * Ausente = la consulta corrió bien (haya encontrado algo o no).
+   */
+  error?: string;
 }
 
 export interface EnrichedProspect extends RawProspect {

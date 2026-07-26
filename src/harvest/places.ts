@@ -96,6 +96,8 @@ interface PlacesSearchResponse {
 interface SearchResult {
   candidates: PlaceCandidate[] | null;
   cacheable: boolean;
+  /** Motivo del fallo. Ausente cuando la consulta corrió bien. */
+  error?: string;
 }
 
 function delay(milliseconds: number): Promise<void> {
@@ -264,10 +266,14 @@ async function searchPlaces(
         },
         body: JSON.stringify(body),
       });
-    } catch {
+    } catch (error) {
       // Un error de transporte no debe perder el resto del lote. Tampoco se
       // cachea: una siguiente corrida merece intentar de nuevo.
-      return { candidates: null, cacheable: false };
+      return {
+        candidates: null,
+        cacheable: false,
+        error: `red: ${error instanceof Error ? error.message : String(error)}`,
+      };
     }
 
     const retryable = response.status === 429 || response.status >= 500;
@@ -276,25 +282,60 @@ async function searchPlaces(
         await sleep(retryBackoffMs * 2 ** (attempt - 1));
         continue;
       }
-      return { candidates: null, cacheable: false };
+      return {
+        candidates: null,
+        cacheable: false,
+        error: `HTTP ${response.status} tras 3 intentos`,
+      };
     }
 
     if (response.status < 200 || response.status >= 300) {
-      return { candidates: null, cacheable: false };
+      // El cuerpo de Google explica la causa exacta (API deshabilitada, key
+      // restringida, facturación sin activar). Perderlo obliga a adivinar.
+      let detalle = "";
+      try {
+        const texto = await response.text();
+        const parsed: unknown = JSON.parse(texto);
+        const mensaje =
+          typeof parsed === "object" &&
+          parsed !== null &&
+          "error" in parsed &&
+          typeof (parsed as { error: unknown }).error === "object" &&
+          (parsed as { error: { message?: unknown } }).error !== null &&
+          typeof (parsed as { error: { message?: unknown } }).error.message === "string"
+            ? (parsed as { error: { message: string } }).error.message
+            : texto;
+        detalle = `: ${mensaje.slice(0, 300)}`;
+      } catch {
+        // Sin cuerpo legible alcanza con el status.
+      }
+      return {
+        candidates: null,
+        cacheable: false,
+        error: `HTTP ${response.status}${detalle}`,
+      };
     }
 
     try {
       const payload: unknown = await response.json();
       if (!isPlacesSearchResponse(payload)) {
-        return { candidates: null, cacheable: false };
+        return {
+          candidates: null,
+          cacheable: false,
+          error: "respuesta con forma inesperada",
+        };
       }
       return { candidates: payload.places ?? [], cacheable: true };
-    } catch {
-      return { candidates: null, cacheable: false };
+    } catch (error) {
+      return {
+        candidates: null,
+        cacheable: false,
+        error: `JSON inválido: ${error instanceof Error ? error.message : String(error)}`,
+      };
     }
   }
 
-  return { candidates: null, cacheable: false };
+  return { candidates: null, cacheable: false, error: "sin intentos restantes" };
 }
 
 export async function enrichProspect(
@@ -313,7 +354,13 @@ export async function enrichProspect(
   const checkedAt = now.toISOString();
   const search = await searchPlaces(prospect, deps);
   if (search.candidates === null) {
-    return { ...prospect, web: emptyWebPresence(checkedAt) };
+    // El motivo viaja en el WebPresence para que la salida pueda distinguir
+    // "falló la consulta" de "consulté y no encontré". No se cachea: un error
+    // de configuración se arregla y la próxima corrida debe reintentar.
+    return {
+      ...prospect,
+      web: { ...emptyWebPresence(checkedAt), error: search.error ?? "fallo sin detalle" },
+    };
   }
 
   if (search.candidates.length === 0) {

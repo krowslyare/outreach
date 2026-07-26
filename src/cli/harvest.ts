@@ -113,6 +113,29 @@ if (shouldEnrich) {
           left.sourceId.localeCompare(right.sourceId),
       );
 
+    // Los fallos de consulta se reportan ANTES que nada y por separado. Un
+    // error de API produce el mismo matchConfidence 0 que una búsqueda sin
+    // coincidencias, así que sin esto una key mal configurada se lee como "el
+    // matching no sirve" y se termina culpando a la heurística.
+    const conError = scored.filter((p) => p.web.error !== undefined);
+    if (conError.length > 0) {
+      const porMensaje = new Map<string, number>();
+      for (const p of conError) {
+        const clave = p.web.error ?? "";
+        porMensaje.set(clave, (porMensaje.get(clave) ?? 0) + 1);
+      }
+      console.error(
+        `\n⚠️  ${conError.length} de ${scored.length} consultas a Places FALLARON.` +
+          ` Esto no es "no encontré", es que la consulta no corrió:`,
+      );
+      for (const [mensaje, n] of [...porMensaje].sort((a, b) => b[1] - a[1])) {
+        console.error(`  ${String(n).padStart(4)}  ${mensaje}`);
+      }
+      console.error(
+        "  Los resultados de abajo no son concluyentes hasta resolver esto.\n",
+      );
+    }
+
     // Contactables y bloqueados se muestran por separado. Mezclarlos ordenados
     // solo por score hace que un registro de "revisar a mano" se lea como un
     // lead listo — sobre todo cuando pocos matches superan el umbral de
