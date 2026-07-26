@@ -27,9 +27,21 @@ export const CLASIFICACIONES_MARGEN = [
 
 export interface ProspectFilterOptions {
   districts?: Set<string>;
+  /**
+   * Prefijo de ubigeo para acotar geográficamente sin enumerar distritos.
+   * "15" es el departamento de Lima — verificado contra el padrón: coincide
+   * exacto con DEPARTAMENTO=LIMA (9,528 filas) y no arrastra otros departamentos.
+   *
+   * Existe para que soltar el filtro de distritos no signifique soltar TODA la
+   * geografía: sin esto, "toda Lima" seleccionaba el país entero.
+   */
+  ubigeoPrefix?: string;
   classifications?: readonly string[];
   requireMobile?: boolean;
 }
+
+/** Departamento de Lima, para `ubigeoPrefix`. */
+export const UBIGEO_LIMA = "15";
 
 interface RenipressMetadata {
   institution: string;
@@ -248,6 +260,10 @@ export function filterProspects(
     }
 
     if (districts && !districts.has(normalizeComparable(row.district))) {
+      return false;
+    }
+
+    if (opts.ubigeoPrefix && !row.ubigeo.startsWith(opts.ubigeoPrefix)) {
       return false;
     }
 
