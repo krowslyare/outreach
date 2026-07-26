@@ -284,3 +284,51 @@ describe("verificación de ausencia de web por coordenadas", () => {
     expect(enriched.web.verificadoSinWeb).toBe(false);
   });
 });
+
+describe("empate en la cima de confianza", () => {
+  const cerca = (id: string, websiteUri?: string) => ({
+    id,
+    displayName: { text: "Clínica Sonrisa Bella" },
+    location: { latitude: -12.0672, longitude: -77.0368 },
+    ...(websiteUri === undefined ? {} : { websiteUri }),
+  });
+
+  it("no verifica cuando un candidato empatado SÍ tiene web", async () => {
+    // La selección conserva el primero ante empate. Si el segundo es igual de
+    // confiable y tiene web, la evidencia se contradice: no sabemos cuál es el
+    // negocio. Verificar acá significaría escribirle "vi que no tienes web" a
+    // alguien que sí la tiene.
+    const fetchMock = vi.fn<FetchLike>().mockResolvedValue(
+      response(200, {
+        places: [cerca("sin-web"), cerca("con-web", "https://ejemplo.pe")],
+      }),
+    );
+
+    const enriched = await enrichProspect(prospect(), {
+      apiKey: "k",
+      fetch: fetchMock,
+      cache: new MemoryCache(),
+    });
+
+    expect(enriched.web.matchConfidence).toBe(0.95);
+    expect(enriched.web.websiteUri).toBeNull();
+    expect(enriched.web.verificadoSinWeb).toBe(false);
+  });
+
+  it("sí verifica cuando todos los empatados carecen de web", async () => {
+    // Places duplica entradas del mismo negocio con frecuencia. Si ninguna
+    // tiene sitio, el empate no aporta contradicción y la verificación se
+    // sostiene.
+    const fetchMock = vi.fn<FetchLike>().mockResolvedValue(
+      response(200, { places: [cerca("dup-1"), cerca("dup-2")] }),
+    );
+
+    const enriched = await enrichProspect(prospect(), {
+      apiKey: "k",
+      fetch: fetchMock,
+      cache: new MemoryCache(),
+    });
+
+    expect(enriched.web.verificadoSinWeb).toBe(true);
+  });
+});

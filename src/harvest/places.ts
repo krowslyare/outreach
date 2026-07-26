@@ -376,10 +376,14 @@ export async function enrichProspect(
     return { ...prospect, web };
   }
 
-  let best = search.candidates[0]!;
-  let confidence = matchConfidence(prospect, best);
-  for (const candidate of search.candidates.slice(1)) {
-    const candidateConfidence = matchConfidence(prospect, candidate);
+  const puntuados = search.candidates.map((candidate) => ({
+    candidate,
+    confidence: matchConfidence(prospect, candidate),
+  }));
+
+  let best = puntuados[0]!.candidate;
+  let confidence = puntuados[0]!.confidence;
+  for (const { candidate, confidence: candidateConfidence } of puntuados.slice(1)) {
     if (candidateConfidence > confidence) {
       best = candidate;
       confidence = candidateConfidence;
@@ -388,6 +392,21 @@ export async function enrichProspect(
 
   const websiteUri =
     typeof best.websiteUri === "string" ? best.websiteUri : null;
+
+  // La selección conserva el primero ante empate, así que un candidato
+  // igual de confiable puede quedar fuera. Si ALGUNO de los empatados en la
+  // cima sí tiene web, la evidencia se contradice: no sabemos cuál de los dos
+  // es el negocio. Ahí no se verifica nada y va a revisión manual.
+  //
+  // Importa porque verificadoSinWeb es justo el flag que salta al humano: un
+  // falso positivo acá significa escribirle "vi que no tienes web" a alguien
+  // que sí la tiene, que es el error que este flag existe para evitar.
+  const empateConWeb = puntuados.some(
+    (p) =>
+      p.confidence === confidence &&
+      p.candidate !== best &&
+      typeof p.candidate.websiteUri === "string",
+  );
 
   const web: WebPresence = {
     checkedAt,
@@ -414,7 +433,9 @@ export async function enrichProspect(
     // tomada con datos: en la calibración, el tramo 0.95 fue el único donde el
     // match era inequívoco.
     verificadoSinWeb:
-      confidence >= CONFIANZA_VERIFICA_SIN_WEB && websiteUri === null,
+      confidence >= CONFIANZA_VERIFICA_SIN_WEB &&
+      websiteUri === null &&
+      !empateConWeb,
   };
 
   if (search.cacheable) {
