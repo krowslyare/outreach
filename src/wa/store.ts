@@ -37,7 +37,10 @@ create table if not exists recipients (
   e164 text primary key, source_id text not null, name text not null,
   district text not null, classification text not null, score integer,
   suppressed integer not null default 0, suppressed_reason text,
-  human_takeover integer not null default 0, created_at text not null);
+  human_takeover integer not null default 0, created_at text not null,
+  -- Contexto que el agente usa para personalizar. Se guarda acá y no se
+  -- recalcula: el prospecto puede responder semanas después del harvest.
+  has_website integer, review_count integer);
 
 create table if not exists messages (
   id integer primary key autoincrement, e164 text not null references recipients(e164),
@@ -93,6 +96,13 @@ function localDayNumber(date: Date, timeZone: string): number {
  */
 export const VENTANA_DEVICE_RATE = 60;
 
+/**
+ * Clasificación que marca un destinatario creado por un inbound de alguien
+ * ajeno a la campaña. Se exporta para que el orquestador pueda reconocerlo sin
+ * repetir el string: es la señal de "no sé quién es esta persona".
+ */
+export const CLASIFICACION_STUB_INBOUND = "INBOUND DESCONOCIDO";
+
 export class Store {
   private readonly db: InstanceType<typeof DatabaseSync>;
 
@@ -119,14 +129,17 @@ export class Store {
   importRecipients(scored: readonly ScoredProspect[]): void {
     const insert = this.db.prepare(`
       insert into recipients (
-        e164, source_id, name, district, classification, score, created_at
-      ) values (?, ?, ?, ?, ?, ?, ?)
+        e164, source_id, name, district, classification, score, created_at,
+        has_website, review_count
+      ) values (?, ?, ?, ?, ?, ?, ?, ?, ?)
       on conflict (e164) do update set
         source_id = excluded.source_id,
         name = excluded.name,
         district = excluded.district,
         classification = excluded.classification,
-        score = excluded.score
+        score = excluded.score,
+        has_website = excluded.has_website,
+        review_count = excluded.review_count
     `);
     const createdAt = this.clock().toISOString();
 
@@ -145,6 +158,8 @@ export class Store {
             prospect.classification,
             prospect.score,
             createdAt,
+            prospect.web.websiteUri === null ? 0 : 1,
+            prospect.web.userRatingCount,
           );
         }
       }
@@ -386,6 +401,85 @@ export class Store {
       .run(e164, body, at.toISOString(), at.toISOString());
   }
 
+  /**
+   * La conversación en orden cronológico, para armar el historial del agente.
+   * Solo mensajes efectivamente enviados o recibidos: un saliente reclamado
+   * pero nunca enviado no forma parte de lo que el prospecto vio.
+   */
+  loadConversacion(e164: string): Array<{ direction: "in" | "out"; body: string }> {
+    return this.db
+      .prepare(
+        `select direction, body
+         from messages
+         where e164 = ?
+           and (direction = 'in' or sent_at is not null)
+         order by coalesce(sent_at, created_at) asc, id asc`,
+      )
+      .all(e164) as Array<{ direction: "in" | "out"; body: string }>;
+  }
+
+  /** Ficha del prospecto para personalizar. null si el número no es de campaña. */
+  loadFichaProspecto(e164: string): {
+    nombre: string;
+    distrito: string;
+    clasificacion: string;
+    tieneWeb: boolean | null;
+    resenas: number | null;
+  } | null {
+    // Se excluyen los stubs que crea recordInbound para no perder un mensaje
+    // por la clave foránea. Un stub NO es un prospecto de campaña: si contara
+    // como ficha válida, cualquiera que le escriba al número recibiría
+    // respuesta del agente, sin contexto y sin haber sido nunca contactado.
+    const row = this.db
+      .prepare(
+        `select name, district, classification, has_website, review_count
+         from recipients
+         where e164 = ? and source_id not like 'inbound:%'`,
+      )
+      .get(e164) as
+      | {
+          name: string;
+          district: string;
+          classification: string;
+          has_website: number | null;
+          review_count: number | null;
+        }
+      | undefined;
+
+    if (row === undefined) return null;
+
+    return {
+      nombre: row.name,
+      distrito: row.district,
+      clasificacion: row.classification,
+      tieneWeb: row.has_website === null ? null : row.has_website !== 0,
+      resenas: row.review_count,
+    };
+  }
+
+  /**
+   * Registra una respuesta conversacional ya enviada.
+   *
+   * Sin idempotency_key a propósito: ésa protege los pasos de campaña, que son
+   * un conjunto cerrado y repetible ('first', 'fu1', 'fu2'). Una respuesta a un
+   * inbound es única por definición y no se reintenta sola — reintentarla sería
+   * mandar dos veces lo mismo, que es justo lo que hay que evitar.
+   */
+  recordOutboundLibre(
+    e164: string,
+    body: string,
+    waMessageId: string,
+    at: Date,
+  ): void {
+    const timestamp = at.toISOString();
+    this.db
+      .prepare(
+        `insert into messages (e164, direction, body, wa_message_id, sent_at, created_at)
+         values (?, 'out', ?, ?, ?, ?)`,
+      )
+      .run(e164, body, waMessageId, timestamp, timestamp);
+  }
+
   suppress(e164: string, reason: string): void {
     this.ensureInboundRecipient(e164, this.clock());
     this.db
@@ -435,7 +529,7 @@ export class Store {
       .prepare(
         `insert into recipients (
            e164, source_id, name, district, classification, score, created_at
-         ) values (?, ?, ?, '', 'INBOUND DESCONOCIDO', null, ?)
+         ) values (?, ?, ?, '', '${CLASIFICACION_STUB_INBOUND}', null, ?)
          on conflict (e164) do nothing`,
       )
       .run(e164, `inbound:${e164}`, e164, at.toISOString());
