@@ -121,6 +121,59 @@ describe("Store", () => {
     });
   });
 
+  it("calcula deviceRate sobre los primeros mensajes maduros más recientes", () => {
+    const finalNow = new Date("2026-07-27T15:00:00.000Z");
+    let current = new Date("2026-07-18T12:00:00.000Z");
+    const store = new Store(":memory:", () => current);
+    stores.push(store);
+    const healthyCount = 100;
+    const failedCount = 20;
+    const prospects = Array.from(
+      { length: healthyCount + failedCount },
+      (_, index) =>
+        scored(
+          `HIST-${index}`,
+          `+519${String(index).padStart(8, "0")}`,
+        ),
+    );
+    store.importRecipients(prospects);
+
+    for (let index = 0; index < healthyCount; index += 1) {
+      current = new Date(
+        new Date("2026-07-18T12:00:00.000Z").getTime() + index * 60_000,
+      );
+      const id = store.claimSend(
+        prospects[index]!.phones[0]!.e164!,
+        "first",
+        "Hola",
+      );
+      if (id === null) throw new Error("claim sano inesperadamente duplicado");
+      store.markSent(id, `wa-healthy-${index}`);
+      store.recordAck(`wa-healthy-${index}`, 2, current);
+    }
+
+    for (let index = 0; index < failedCount; index += 1) {
+      current = new Date(
+        new Date("2026-07-25T12:00:00.000Z").getTime() + index * 60_000,
+      );
+      const prospect = prospects[healthyCount + index]!;
+      const id = store.claimSend(prospect.phones[0]!.e164!, "first", "Hola");
+      if (id === null) throw new Error("claim fallido inesperadamente duplicado");
+      store.markSent(id, `wa-failed-${index}`);
+      store.recordAck(`wa-failed-${index}`, 1, current);
+    }
+
+    const lifetimeRate = healthyCount / (healthyCount + failedCount);
+    const healthInWindow = store.loadAccountHealth(finalNow, failedCount);
+
+    // El histórico sano no debe diluir la degradación reciente: sin LIMIT la
+    // tasa sería ~0.83 y el kill switch tardaría demasiado en reaccionar.
+    expect(lifetimeRate).toBeCloseTo(0.83, 2);
+    expect(healthInWindow.deviceRate).toBeCloseTo(0, 5);
+    expect(healthInWindow.deviceRateSample).toBe(failedCount);
+    expect(healthInWindow.deviceRateSample).toBeLessThanOrEqual(failedCount);
+  });
+
   it("cuenta sentToday con el día de Lima, no el día UTC", () => {
     const current = new Date("2026-07-26T03:00:00.000Z");
     const store = new Store(":memory:", () => current);

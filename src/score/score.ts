@@ -72,8 +72,20 @@ export function scoreProspect(p: EnrichedProspect): ScoredProspect {
     signals.push({
       name: "sin_web",
       points: 40,
-      detail: "Places no reporta web y el match es confiable",
+      detail: p.web.verificadoSinWeb
+        ? "verificado: no tiene web"
+        : "Places no reporta web (sin verificar)",
     });
+
+    // La señal suma para priorizar, pero no habilita el contacto por sí sola.
+    // Que Places no traiga websiteUri es un dato ausente, no una prueba de que
+    // el negocio no tenga sitio: el match puede ser perfecto y el campo estar
+    // simplemente vacío en Places. Contactar con ese supuesto significa
+    // escribirle "vi que no tienes web" a alguien que sí la tiene, que quema
+    // el prospecto y el pitch de una sola vez.
+    if (p.web.verificadoSinWeb !== true) {
+      blockers.push("falta verificar que realmente no tiene web");
+    }
   }
 
   const marginSignal = classificationSignal(p.classification);

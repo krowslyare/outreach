@@ -340,3 +340,53 @@ describe("decidirRespuesta", () => {
     }
   });
 });
+
+describe("interpretar — regresiones del review", () => {
+  it("no envía texto truncado por límite de tokens", () => {
+    // Con pensamiento adaptativo el presupuesto de salida se comparte, así que
+    // agotarlo devuelve texto no vacío pero cortado a media frase. Mandarlo se
+    // ve peor que no contestar y delata que hay un bot detrás.
+    const decision = interpretar({
+      stop_reason: "max_tokens",
+      content: [{ type: "text", text: "Claro, el plan Empresa + incluye aten" }],
+    });
+
+    expect(decision.kind).toBe("escalar");
+    if (decision.kind !== "escalar") throw new Error("esperaba escalar");
+    expect(decision.resumen).toContain("truncó");
+  });
+
+  it("el escalamiento gana cuando vienen varias herramientas", () => {
+    // "no me interesa, pero quiero hablar con Hideki" puede disparar las dos.
+    // Si ganara el orden del contenido, un marcar_perdido descartaría un pedido
+    // explícito de hablar con una persona.
+    const decision = interpretar({
+      stop_reason: "tool_use",
+      content: [
+        { type: "tool_use", name: "marcar_perdido", input: { motivo: "no_interesa" } },
+        {
+          type: "tool_use",
+          name: "escalar_a_humano",
+          input: { motivo: "pide_humano", resumen: "Quiere hablar con Hideki." },
+        },
+      ],
+    });
+
+    expect(decision).toEqual({
+      kind: "escalar",
+      motivo: "pide_humano",
+      resumen: "Quiere hablar con Hideki.",
+    });
+  });
+
+  it("sigue marcando perdido cuando esa es la única herramienta", () => {
+    const decision = interpretar({
+      stop_reason: "tool_use",
+      content: [
+        { type: "tool_use", name: "marcar_perdido", input: { motivo: "ya_tiene_proveedor" } },
+      ],
+    });
+
+    expect(decision).toEqual({ kind: "perdido", motivo: "ya_tiene_proveedor" });
+  });
+});
