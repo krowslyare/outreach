@@ -68,6 +68,20 @@ export interface WebPresence {
    * Por debajo de ~0.6 el resultado no se usa para decidir.
    */
   matchConfidence: number;
+  /**
+   * Si una verificación independiente confirmó que el negocio NO tiene web.
+   *
+   * `matchConfidence` responde "¿este Place es este prospecto?", que es una
+   * pregunta distinta de "¿este negocio tiene web?". Un match perfecto con
+   * `websiteUri` nulo sigue sin probar que no exista un sitio: Places
+   * simplemente puede no tenerlo cargado.
+   *
+   * Opcional y con default de "no verificado" a propósito: es un flag de
+   * seguridad, y ausente debe significar el lado conservador. Escribirle
+   * "vi que no tienes web" a alguien que sí la tiene quema el prospecto y
+   * el pitch de una sola vez.
+   */
+  verificadoSinWeb?: boolean;
 }
 
 export interface EnrichedProspect extends RawProspect {
