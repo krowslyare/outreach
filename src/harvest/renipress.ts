@@ -62,6 +62,27 @@ function parseCoordinate(
     : null;
 }
 
+/**
+ * Quita el código de país cuando el registro ya trae el número internacional.
+ *
+ * En el padrón hay 126 celulares escritos como "+51 9XX XXX XXX" o
+ * "519XXXXXXXX". Sin esto quedan en 11 dígitos, no matchean la regla de móvil
+ * y se descartan como si no tuvieran WhatsApp.
+ *
+ * Se exige que el dígito tras el 51 sea 9 para no romper un fijo que
+ * casualmente empiece en 51.
+ */
+function normalizarPrefijoPais(digits: string): string {
+  if (digits.length === 11 && digits.startsWith("51") && digits[2] === "9") {
+    return digits.slice(2);
+  }
+  // Formato con salida internacional: 0051 9XXXXXXXX.
+  if (digits.length === 13 && digits.startsWith("0051") && digits[4] === "9") {
+    return digits.slice(4);
+  }
+  return digits;
+}
+
 export function normalizePhone(raw: string): Phone[] {
   const seen = new Set<string>();
   const phones: Phone[] = [];
@@ -70,7 +91,7 @@ export function normalizePhone(raw: string): Phone[] {
     const value = part.trim();
     if (!value) continue;
 
-    const digits = value.replace(/\D/g, "");
+    const digits = normalizarPrefijoPais(value.replace(/\D/g, ""));
     let kind: Phone["kind"] = "unknown";
     let e164: string | null = null;
 
@@ -150,8 +171,12 @@ export function parseRenipress(csvText: string): RawProspect[] {
 
   if (!header) return [];
 
-  // El BOM puede aparecer al inicio incluso después de decodificar latin-1.
-  header[0] = header[0]?.replace(/^\uFEFF/, "") ?? "";
+  // El BOM se limpia en sus dos formas. Un BOM UTF-8 leído como latin-1 NO
+  // decodifica a U+FEFF sino a "ï»¿", así que quitar solo U+FEFF dejaría el
+  // primer encabezado como "ï»¿INSTITUCION" y la validación rechazaría el
+  // archivo entero. El CSV actual de SUSALUD no trae BOM, pero un cambio de
+  // export lo rompería sin aviso.
+  header[0] = header[0]?.replace(/^(\uFEFF|\u00EF\u00BB\u00BF)/, "") ?? "";
   const columnIndex = new Map(header.map((column, index) => [column.trim(), index]));
   const requiredColumns = [
     "INSTITUCION",
@@ -308,22 +333,29 @@ export function dedupeByMobile(rows: RawProspect[]): {
   const kept: RawProspect[] = [];
 
   for (const row of sorted) {
-    const mobile = row.phones.find(
+    // Se consideran TODOS los móviles de la fila, no solo el primero. Hay 105
+    // filas con dos o más móviles distintos: si A trae [X, compartido] y B trae
+    // [Y, compartido], mirando solo el primero ambas sobreviven y el número
+    // compartido se contacta dos veces sin que la colisión se reporte.
+    const mobiles = row.phones.filter(
       (phone): phone is Phone & { e164: string } =>
         phone.kind === "mobile" && phone.e164 !== null,
     );
 
-    if (!mobile) {
+    if (mobiles.length === 0) {
       kept.push(row);
       continue;
     }
 
-    const sourceIds = sourceIdsByMobile.get(mobile.e164) ?? [];
-    sourceIds.push(row.sourceId);
-    sourceIdsByMobile.set(mobile.e164, sourceIds);
+    for (const mobile of mobiles) {
+      const sourceIds = sourceIdsByMobile.get(mobile.e164) ?? [];
+      sourceIds.push(row.sourceId);
+      sourceIdsByMobile.set(mobile.e164, sourceIds);
+    }
 
-    if (!firstByMobile.has(mobile.e164)) {
-      firstByMobile.set(mobile.e164, row);
+    const yaReclamado = mobiles.some((mobile) => firstByMobile.has(mobile.e164));
+    if (!yaReclamado) {
+      for (const mobile of mobiles) firstByMobile.set(mobile.e164, row);
       kept.push(row);
     }
   }
