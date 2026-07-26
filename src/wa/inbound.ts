@@ -28,7 +28,9 @@ export function handleInbound(
     return { action: "suppressed" };
   }
 
-  // TODO(M5): entregar aquí el inbound al agente. Hasta que exista, responder
-  // automáticamente sería saltarse el único componente que entiende contexto.
+  // Este módulo solo registra y aplica el opt-out; deliberadamente no decide
+  // qué responder. Quien encadena inbound → agente → handoff es
+  // src/orquestador/conversacion.ts, que es donde viven las puertas de
+  // seguridad de una respuesta.
   return { action: "needs_agent" };
 }
