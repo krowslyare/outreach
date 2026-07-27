@@ -37,6 +37,7 @@ function recipient(overrides: Partial<RecipientState> = {}): RecipientState {
     firstOutboundAt: null,
     lastOutboundAt: null,
     lastInboundAt: null,
+    lastHumanInboundAt: null,
     followUpCount: 0,
     ...overrides,
   };
@@ -190,7 +191,10 @@ describe("canContact", () => {
   it("termina la cadencia si el destinatario ya respondió", () => {
     expect(
       canContact(
-        recipient({ lastInboundAt: MONDAY_AT_10_LIMA }),
+        recipient({
+          lastInboundAt: MONDAY_AT_10_LIMA,
+          lastHumanInboundAt: MONDAY_AT_10_LIMA,
+        }),
         config(),
         MONDAY_AT_10_LIMA,
       ),
@@ -198,6 +202,26 @@ describe("canContact", () => {
       allow: false,
       reason: expect.stringContaining("respondió"),
     });
+  });
+
+  // El caso que mataba la cadencia de toda la lista: casi todo establecimiento
+  // tiene saludo automático de WhatsApp Business y llega a los segundos del
+  // primer contacto. Si eso cuenta como respuesta, ningún follow-up sale nunca.
+  it("un entrante automático NO termina la cadencia", () => {
+    const primerContacto = new Date(MONDAY_AT_10_LIMA.getTime() - 3 * 86_400_000);
+    expect(
+      canContact(
+        recipient({
+          firstOutboundAt: primerContacto,
+          lastOutboundAt: primerContacto,
+          // Llegó un entrante, pero ninguno humano.
+          lastInboundAt: primerContacto,
+          lastHumanInboundAt: null,
+        }),
+        config(),
+        MONDAY_AT_10_LIMA,
+      ),
+    ).toMatchObject({ allow: true });
   });
 
   it("abre el primer follow-up en el día 3 y no antes", () => {

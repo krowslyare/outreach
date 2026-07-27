@@ -246,6 +246,90 @@ describe("Store", () => {
     });
   });
 
+  // El escenario real completo: se manda el primer contacto, el saludo
+  // automático de WhatsApp Business llega a los segundos, y el prospecto tiene
+  // que seguir recibiendo follow-ups. Antes de esto, ese saludo lo sacaba de la
+  // campaña para siempre y toda la lista quedaba con un solo mensaje.
+  it("un entrante automático no saca al prospecto de la cadencia", () => {
+    const enviado = new Date("2026-07-27T15:00:00.000Z");
+    const store = new Store(":memory:", () => enviado);
+    stores.push(store);
+    store.importRecipients([scored("A", "+51999111222")]);
+
+    const id = store.claimSend("+51999111222", "first", "Hola");
+    if (id === null) throw new Error("claim inesperado");
+    store.markSent(id, "wa-out-1");
+
+    store.recordInbound(
+      "+51999111222",
+      "Gracias por comunicarte, en breve te atenderemos",
+      new Date(enviado.getTime() + 2_000),
+      { waMessageId: "wa-in-1", clase: "automatico" },
+    );
+
+    const estado = store.loadRecipientState("+51999111222");
+    // Queda el rastro de auditoría, pero no cuenta como respuesta.
+    expect(estado.lastInboundAt).not.toBeNull();
+    expect(estado.lastHumanInboundAt).toBeNull();
+    // Y sigue en la cola: si la consulta y canContact divergieran, el candidato
+    // pasaría una y moriría en la otra.
+    expect(store.candidatosParaContactar(10).map((c) => c.e164)).toContain(
+      "+51999111222",
+    );
+    // El agente no debe ver un turno del "prospecto" que el prospecto no escribió.
+    expect(store.loadConversacion("+51999111222")).toEqual([
+      { direction: "out", body: "Hola" },
+    ]);
+  });
+
+  it("un entrante humano sí termina la cadencia", () => {
+    const at = new Date("2026-07-27T15:00:00.000Z");
+    const store = new Store(":memory:", () => at);
+    stores.push(store);
+    store.importRecipients([scored("A", "+51999111222")]);
+
+    store.recordInbound("+51999111222", "¿De qué se trata?", at, {
+      waMessageId: "wa-in-1",
+      clase: "humano",
+    });
+
+    expect(store.loadRecipientState("+51999111222").lastHumanInboundAt).toEqual(at);
+    expect(store.candidatosParaContactar(10)).toEqual([]);
+  });
+
+  it("no registra dos veces el mismo mensaje de WhatsApp", () => {
+    const at = new Date("2026-07-27T15:00:00.000Z");
+    const store = new Store(":memory:", () => at);
+    stores.push(store);
+    store.importRecipients([scored("A", "+51999111222")]);
+
+    expect(
+      store.recordInbound("+51999111222", "Hola", at, { waMessageId: "wa-in-1" }),
+    ).toBe(true);
+    expect(
+      store.recordInbound("+51999111222", "Hola", at, { waMessageId: "wa-in-1" }),
+    ).toBe(false);
+    expect(store.loadConversacion("+51999111222")).toHaveLength(1);
+  });
+
+  // Las respuestas del agente son salientes enviados igual que un follow-up.
+  // Contarlas empujaba al prospecto por encima de maxFollowUps sin que se
+  // hubiera mandado un solo follow-up de campaña.
+  it("las respuestas libres del agente no cuentan como follow-ups", () => {
+    const at = new Date("2026-07-27T15:00:00.000Z");
+    const store = new Store(":memory:", () => at);
+    stores.push(store);
+    store.importRecipients([scored("A", "+51999111222")]);
+
+    const id = store.claimSend("+51999111222", "first", "Hola");
+    if (id === null) throw new Error("claim inesperado");
+    store.markSent(id, "wa-out-1");
+    store.recordOutboundLibre("+51999111222", "Le cuento", "wa-out-2", at);
+    store.recordOutboundLibre("+51999111222", "Y también", "wa-out-3", at);
+
+    expect(store.loadRecipientState("+51999111222").followUpCount).toBe(0);
+  });
+
   it("persiste el kill switch sin permitir que un estado false lo levante", () => {
     const at = new Date("2026-07-26T03:00:00.000Z");
     const store = new Store(":memory:", () => at);

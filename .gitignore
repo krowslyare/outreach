@@ -10,3 +10,4 @@ data_*.csv
 node_modules/
 .places-cache/
 .wwebjs_auth/
+outreach.sqlite

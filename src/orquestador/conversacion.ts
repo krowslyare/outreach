@@ -8,6 +8,7 @@
 import { decidirRespuesta, type Turno } from "../agent/agent.js";
 import { ejecutarHandoff, type HandoffDeps } from "../handoff/handoff.js";
 import type { ProveedorLLM } from "../llm/port.js";
+import type { InboundEvent } from "../wa/client.js";
 import { handleInbound } from "../wa/inbound.js";
 import { zonedParts } from "../wa/safety.js";
 import { CLASIFICACION_STUB_INBOUND, type Store } from "../wa/store.js";
@@ -15,6 +16,9 @@ import type { SafetyConfig } from "../wa/types.js";
 
 export type ResultadoConversacion =
   | { accion: "suprimido" }
+  | { accion: "duplicado" }
+  /** Autorespondedor: se registró, no se contesta y la cadencia sigue viva. */
+  | { accion: "automatico"; razon: string }
   | { accion: "ignorado"; razon: string }
   | { accion: "respondido"; texto: string }
   | { accion: "escalado"; motivo: string }
@@ -25,6 +29,7 @@ export interface ConversacionDeps {
   store: Pick<
     Store,
     | "recordInbound"
+    | "ultimoOutboundAt"
     | "suppress"
     | "loadRecipientState"
     | "loadConversacion"
@@ -75,13 +80,20 @@ function puedeResponder(
 
 export async function manejarInbound(
   deps: ConversacionDeps,
-  e164: string,
-  body: string,
-  at: Date,
+  evento: InboundEvent,
 ): Promise<ResultadoConversacion> {
-  // 1. El rastro y el opt-out primero, igual que antes.
-  const inbound = handleInbound({ store: deps.store }, e164, body, at);
+  const e164 = evento.e164;
+  // 1. Rastro, idempotencia, opt-out y clasificación. Todo antes del agente.
+  const inbound = handleInbound({ store: deps.store }, evento);
+  if (inbound.action === "duplicate") return { accion: "duplicado" };
   if (inbound.action === "suppressed") return { accion: "suprimido" };
+  // Un autorespondedor no es el prospecto hablando: ni se le contesta ni se
+  // gasta una llamada al LLM en él. Y, sobre todo, la cadencia de follow-ups
+  // sigue viva — de eso se encarga canContact leyendo lastHumanInboundAt.
+  if (inbound.action === "automatic") {
+    deps.log?.(`inbound automático de ${e164}: ${inbound.motivo}`);
+    return { accion: "automatico", razon: inbound.motivo };
+  }
 
   // 2. Un número que no es de campaña no se contesta solo. Puede ser cualquiera
   //    escribiendo al número; el agente no tiene contexto y responder sería
