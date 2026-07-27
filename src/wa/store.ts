@@ -495,6 +495,31 @@ export class Store {
   }
 
   /**
+   * Libera los pasos reclamados que nunca confirmaron un envío, para un número
+   * de prueba. Devuelve cuántos liberó.
+   *
+   * `claimSend` reclama la llave ANTES de tocar la red, a propósito: si el
+   * proceso muere después de enviar, preferimos perder el mensaje a duplicarlo.
+   * El costo es que un fallo de envío deja el paso quemado y el reintento choca
+   * con "envío ya reclamado" para siempre.
+   *
+   * Solo toca números de prueba y solo filas con `sent_at` nulo. Aun así hay
+   * ambigüedad —"no se confirmó" no es lo mismo que "no salió"—, y por eso está
+   * limitado a un teléfono propio: ahí el operador puede mirar el chat y
+   * decidir. Sobre un prospecto real esta operación no existe.
+   */
+  liberarEnviosNoConfirmados(e164: string): number {
+    if (!this.esDestinatarioDePrueba(e164)) return 0;
+    const resultado = this.db
+      .prepare(
+        `delete from messages
+         where e164 = ? and direction = 'out' and sent_at is null`,
+      )
+      .run(e164);
+    return Number(resultado.changes);
+  }
+
+  /**
    * Borra un destinatario sembrado a mano y todo su historial.
    *
    * Solo toca filas con `source_id` de prueba. Ésa es la garantía que hace que
