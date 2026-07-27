@@ -71,16 +71,32 @@ const prospecto: ScoredProspect = {
 const store = new Store();
 try {
   store.importRecipients([prospecto]);
-  const enCola = store
-    .candidatosParaContactar(50)
-    .some((candidato) => candidato.e164 === e164);
+  const cola = store.candidatosParaContactar(50);
+  const posicion = cola.findIndex((candidato) => candidato.e164 === e164);
   console.info(`Sembrado ${e164} — ${nombre} (${distrito}, ${clasificacion})`);
-  console.info(
-    enCola
-      ? "Está en la cola de contacto."
-      : "NO está en la cola: revisa si ya está suprimido, tomado por un humano o " +
-          "si ya respondió alguien desde ese número.",
-  );
+  if (posicion < 0) {
+    console.info(
+      "NO está en la cola: revisa si ya está suprimido, tomado por un humano o " +
+        "si ya respondió alguien desde ese número.",
+    );
+  } else {
+    // La cabeza de la cola se imprime porque el riesgo de una prueba no es que
+    // falle: es pasarse de `--max` y que el segundo mensaje salga hacia un
+    // prospecto real. Hay que poder ver a quién le tocaría antes de mandar.
+    console.info(`\nPróximos en la cola (--max N toma los primeros N):`);
+    for (const [indice, candidato] of cola.slice(0, 5).entries()) {
+      const marca = candidato.e164 === e164 ? " ← el que acabas de sembrar" : "";
+      console.info(
+        `  ${indice + 1}. ${candidato.e164}  score ${candidato.score ?? "—"}${marca}`,
+      );
+    }
+    if (posicion > 0) {
+      console.warn(
+        `\n⚠️  Tu número de prueba está en la posición ${posicion + 1}. ` +
+          `Con --max ${posicion + 1} le escribirías antes a ${posicion} prospecto(s) REAL(es).`,
+      );
+    }
+  }
 } finally {
   store.close();
 }
