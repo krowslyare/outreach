@@ -81,8 +81,29 @@ export class WhatsAppWebClient implements WaClient {
     this.fatalHandlers.add(callback);
   }
 
+  /**
+   * Levanta la sesión y NO vuelve hasta que se puede enviar de verdad.
+   *
+   * `initialize()` resuelve cuando la página quedó montada, que es antes de que
+   * WhatsApp Web termine de cargar su store interno. Esperar solo a eso hacía
+   * que la campaña llamara a `sendText` contra un cliente a medio levantar y
+   * reventara con "Cannot read properties of undefined (reading 'getChat')" —
+   * un error que no dice nada sobre su causa. El evento `ready` es la única
+   * señal de que el store está cargado.
+   *
+   * Si nadie escanea el QR, esto no vuelve nunca, y así debe ser: el operador
+   * está mirando la pantalla y el proceso no tiene nada que hacer mientras
+   * tanto.
+   */
   async start(): Promise<void> {
+    const listo = new Promise<void>((resolve, reject) => {
+      this.client.once("ready", () => resolve());
+      this.client.once("auth_failure", (message: string) => {
+        reject(new Error(`auth_failure: ${message}`));
+      });
+    });
     await this.client.initialize();
+    await listo;
   }
 
   async stop(): Promise<void> {
@@ -91,11 +112,25 @@ export class WhatsAppWebClient implements WaClient {
 
   private wireEvents(): void {
     this.client.on("qr", (qr: string) => {
-      console.info("WhatsApp requiere vinculación; escanea este QR:");
-      qrcode.generate(qr, { small: true });
+      // Con marco y a tamaño completo: el QR chico se rompe en terminales que
+      // no dibujan medios bloques, y ahí el operador ve un borrón y cree que
+      // el proceso no arrancó.
+      console.info(
+        "\n" +
+          "═".repeat(60) +
+          "\n  ESCANEA ESTE QR desde el WhatsApp que va a enviar:\n" +
+          "  WhatsApp → Dispositivos vinculados → Vincular dispositivo\n" +
+          "═".repeat(60) +
+          "\n",
+      );
+      qrcode.generate(qr, { small: false });
+      console.info(
+        "\nSi ves un borrón en vez de un QR, corre esto en una terminal " +
+          "de verdad (Terminal.app o iTerm), no en un panel de salida.\n",
+      );
     });
     this.client.on("ready", () => {
-      console.info("WhatsApp listo.");
+      console.info("WhatsApp listo: store cargado, ya se puede enviar.");
     });
     this.client.on("authenticated", () => {
       console.info("WhatsApp autenticado.");
