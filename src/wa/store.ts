@@ -480,6 +480,34 @@ export class Store {
   }
 
   /**
+   * Borra un destinatario sembrado a mano y todo su historial.
+   *
+   * Solo toca filas con `source_id` de prueba. Ésa es la garantía que hace que
+   * este método pueda existir: un prospecto real nunca se borra, porque perder
+   * su historial de mensajes destruye la evidencia de qué se le mandó y cuándo,
+   * que es lo que sostiene la supresión y el conteo de follow-ups.
+   *
+   * Devuelve false si el número no existe o no es de prueba.
+   */
+  eliminarDestinatarioDePrueba(e164: string): boolean {
+    const fila = this.db
+      .prepare("select source_id from recipients where e164 = ?")
+      .get(e164) as { source_id: string } | undefined;
+    if (fila === undefined || !fila.source_id.startsWith("prueba:")) return false;
+
+    this.db.exec("begin immediate");
+    try {
+      this.db.prepare("delete from messages where e164 = ?").run(e164);
+      this.db.prepare("delete from recipients where e164 = ?").run(e164);
+      this.db.exec("commit");
+    } catch (error) {
+      this.db.exec("rollback");
+      throw error;
+    }
+    return true;
+  }
+
+  /**
    * Último saliente enviado a este número, o null.
    *
    * A diferencia de `loadRecipientState`, no exige que el destinatario exista:

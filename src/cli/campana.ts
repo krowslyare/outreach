@@ -87,6 +87,23 @@ try {
           "está listo; sin eso, una conversación caliente se perdería.",
       );
     }
+    // NUMERO_HUMANO es el destino de los escalamientos, así que tenerlo también
+    // en la cola significa que el bot le haría outreach en frío a tu propio
+    // número de escalamiento. Pasa de verdad: se siembra para probar y queda.
+    // Se avisa en vez de suprimirlo solo, porque durante una prueba es
+    // exactamente lo que uno quiere.
+    if (
+      store
+        .candidatosParaContactar(200)
+        .some((candidato) => candidato.e164 === numeroHumano)
+    ) {
+      console.warn(
+        `\n⚠️  ${numeroHumano} es NUMERO_HUMANO y además está en la cola de contacto.\n` +
+          `   El bot le va a escribir en frío a tu propio número de escalamiento.\n` +
+          `   Si era una prueba: npm run sembrar -- --e164 ${numeroHumano} --quitar\n`,
+      );
+    }
+
     wa = createWaClient();
     const waActivo = wa;
     wa.onAck((waMessageId, ack, at) => {

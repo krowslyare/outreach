@@ -21,6 +21,7 @@ function valor(args: readonly string[], nombre: string): string | undefined {
 
 const args = process.argv.slice(2);
 const e164 = valor(args, "e164")?.trim();
+const quitar = args.includes("--quitar");
 const nombre = valor(args, "nombre")?.trim();
 const distrito = valor(args, "distrito")?.trim() ?? "MIRAFLORES";
 const clasificacion = valor(args, "clasificacion")?.trim() ?? "CENTRO ODONTOLOGICO";
@@ -31,6 +32,21 @@ if (e164 === undefined || !/^\+51\d{9}$/.test(e164)) {
     "--e164 requiere un móvil peruano en E.164, por ejemplo +51987654321",
   );
 }
+if (quitar) {
+  const store = new Store();
+  try {
+    const borrado = store.eliminarDestinatarioDePrueba(e164);
+    console.info(
+      borrado
+        ? `Quitado ${e164} y su historial.`
+        : `${e164} no existe o NO es un número de prueba; no se tocó nada.`,
+    );
+  } finally {
+    store.close();
+  }
+  process.exit(0);
+}
+
 if (nombre === undefined || nombre === "") {
   throw new Error(
     "--nombre es obligatorio: es lo que el compositor usa para personalizar, " +
