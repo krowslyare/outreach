@@ -8,6 +8,7 @@ import "./env.js";
 import { crearProveedor } from "../llm/index.js";
 import { ejecutarTanda } from "../sequence/campaign.js";
 import { createWaClient, type WaClient } from "../wa/client.js";
+import { enSerie } from "../orquestador/cola.js";
 import { manejarInbound } from "../orquestador/conversacion.js";
 import { hardKill } from "../wa/safety.js";
 import { Store } from "../wa/store.js";
@@ -205,7 +206,11 @@ try {
       // agente y ejecuta el handoff. Con el de bajo nivel, un prospecto que
       // responde durante la tanda queda registrado y sin respuesta — y si
       // quería contratar, sin escalar.
-      void manejarInbound(
+      // Serializado POR NÚMERO: dos mensajes seguidos del mismo prospecto
+      // arrancaban dos ejecuciones a la vez, cada una con historial incompleto.
+      // Chats distintos siguen avanzando en paralelo.
+      void enSerie(evento.e164, () =>
+        manejarInbound(
         {
           store,
           proveedor,
@@ -216,6 +221,7 @@ try {
           log: (mensaje) => console.log(`[inbound] ${mensaje}`),
         },
         evento,
+      ),
       ).catch((error: unknown) => {
         // Un fallo atendiendo un inbound no debe tumbar la tanda saliente.
         console.error(`[inbound] error atendiendo ${evento.e164}:`, error);
