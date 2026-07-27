@@ -114,9 +114,10 @@ function crearDobles(opciones: OpcionesDobles = {}) {
           resenas: null,
         };
       }
-      return true;
+      return "nuevo" as const;
     }),
     suppress: vi.fn(),
+    marcarInboundAtendido: vi.fn(),
     loadRecipientState: vi.fn(() => ({
       ...ESTADO,
       ...opciones.estado,
@@ -257,7 +258,7 @@ describe("manejarInbound", () => {
 
   it("difiere una respuesta fuera de horario para no delatar al bot", async () => {
     const madrugada = new Date("2026-07-27T08:00:00.000Z"); // lunes, 03:00 en Lima
-    const { deps, enviar } = crearDobles({ now: madrugada });
+    const { deps, store, enviar } = crearDobles({ now: madrugada });
 
     const resultado = await manejarInbound(
       deps,
@@ -269,6 +270,35 @@ describe("manejarInbound", () => {
       "fuera de la ventana horaria",
     );
     expect(enviar).not.toHaveBeenCalled();
+    // No se envió nada, así que la respuesta se sigue debiendo: marcarlo
+    // atendido lo descartaría para siempre en la próxima reconexión.
+    expect(store.marcarInboundAtendido).not.toHaveBeenCalled();
+  });
+
+  // El P1 del review: si el LLM, el handoff o el envío fallan DESPUÉS de que la
+  // fila se guardó, el evento no puede quedar marcado como atendido — si no, una
+  // reconexión lo descarta por duplicado y el prospecto nunca recibe respuesta.
+  it("no marca atendido un inbound cuyo procesamiento falló", async () => {
+    const { deps, store, enviar } = crearDobles();
+    enviar.mockRejectedValueOnce(new Error("WhatsApp se cayó"));
+
+    await expect(
+      manejarInbound(deps, eventoInbound("Sí, me interesa")),
+    ).rejects.toThrow("WhatsApp se cayó");
+
+    expect(store.marcarInboundAtendido).not.toHaveBeenCalled();
+  });
+
+  it("marca atendido un inbound que llegó a un final", async () => {
+    const { deps, store } = crearDobles();
+    const evento = eventoInbound("Cuénteme más");
+
+    await manejarInbound(deps, evento);
+
+    expect(store.marcarInboundAtendido).toHaveBeenCalledWith(
+      evento.waMessageId,
+      EN_HORARIO,
+    );
   });
 
   it("difiere una respuesta cuando el kill switch está activo", async () => {

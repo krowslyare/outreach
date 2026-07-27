@@ -1,7 +1,16 @@
+import { mkdtempSync } from "node:fs";
+import { createRequire } from "node:module";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+
 import { afterEach, describe, expect, it } from "vitest";
 
 import type { ScoredProspect } from "../types.js";
 import { Store } from "./store.js";
+
+// Igual que en store.ts: vitest 2 no resuelve `node:sqlite` sin esto.
+const require = createRequire(import.meta.url);
+const { DatabaseSync } = require("node:sqlite") as typeof import("node:sqlite");
 
 function scored(
   sourceId: string,
@@ -305,11 +314,40 @@ describe("Store", () => {
 
     expect(
       store.recordInbound("+51999111222", "Hola", at, { waMessageId: "wa-in-1" }),
-    ).toBe(true);
+    ).toBe("nuevo");
+    store.marcarInboundAtendido("wa-in-1", at);
     expect(
       store.recordInbound("+51999111222", "Hola", at, { waMessageId: "wa-in-1" }),
-    ).toBe(false);
+    ).toBe("ya_atendido");
     expect(store.loadConversacion("+51999111222")).toHaveLength(1);
+  });
+
+  // Recibir no es atender. Si el LLM, el handoff o el envío fallan después del
+  // insert, el evento tiene que poder rehacerse: dejar sin respuesta a alguien
+  // que escribió "sí, me interesa" es peor que contestarle dos veces.
+  it("un entrante recibido y no atendido queda pendiente, no duplicado", () => {
+    const at = new Date("2026-07-27T15:00:00.000Z");
+    const store = new Store(":memory:", () => at);
+    stores.push(store);
+    store.importRecipients([scored("A", "+51999111222")]);
+
+    store.recordInbound("+51999111222", "Sí, me interesa", at, {
+      waMessageId: "wa-in-1",
+    });
+    expect(
+      store.recordInbound("+51999111222", "Sí, me interesa", at, {
+        waMessageId: "wa-in-1",
+      }),
+    ).toBe("pendiente");
+    // Sigue habiendo una sola fila: se reprocesa, no se duplica el historial.
+    expect(store.loadConversacion("+51999111222")).toHaveLength(1);
+
+    store.marcarInboundAtendido("wa-in-1", at);
+    expect(
+      store.recordInbound("+51999111222", "Sí, me interesa", at, {
+        waMessageId: "wa-in-1",
+      }),
+    ).toBe("ya_atendido");
   });
 
   // Las respuestas del agente son salientes enviados igual que un follow-up.
@@ -328,6 +366,38 @@ describe("Store", () => {
     store.recordOutboundLibre("+51999111222", "Y también", "wa-out-3", at);
 
     expect(store.loadRecipientState("+51999111222").followUpCount).toBe(0);
+  });
+
+  // El P2 del review: el ALTER TABLE commitea solo. Si el proceso muere entre
+  // ése y el relleno, la siguiente arrancada ve la columna presente y —si el
+  // relleno viviera dentro del `if`— se lo saltaría para siempre. Los salientes
+  // de campaña quedarían con step nulo, followUpCount volvería a 0 y un fu1 ya
+  // enviado se elegiría una y otra vez para morir contra su propia llave de
+  // idempotencia, sin llegar nunca a fu2.
+  it("rellena el step aunque la columna ya exista de una migración a medias", () => {
+    const archivo = join(
+      mkdtempSync(join(tmpdir(), "outreach-migracion-")),
+      "outreach.sqlite",
+    );
+    const at = new Date("2026-07-27T15:00:00.000Z");
+    const store = new Store(archivo, () => at);
+    store.importRecipients([scored("A", "+51999111222")]);
+    for (const paso of ["first", "fu1"] as const) {
+      const id = store.claimSend("+51999111222", paso, `Mensaje ${paso}`);
+      if (id === null) throw new Error("claim inesperado");
+      store.markSent(id, `wa-out-${paso}`);
+    }
+    store.close();
+
+    // Simula el corte: la columna existe pero quedó sin rellenar.
+    const crudo = new DatabaseSync(archivo);
+    crudo.exec("update messages set step = null");
+    crudo.close();
+
+    const reabierto = new Store(archivo, () => at);
+    stores.push(reabierto);
+    // Con step nulo esto habría dado 0, y el fu1 ya enviado se reintentaría solo.
+    expect(reabierto.loadRecipientState("+51999111222").followUpCount).toBe(1);
   });
 
   it("persiste el kill switch sin permitir que un estado false lo levante", () => {

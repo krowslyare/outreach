@@ -29,6 +29,7 @@ export interface ConversacionDeps {
   store: Pick<
     Store,
     | "recordInbound"
+    | "marcarInboundAtendido"
     | "ultimoOutboundAt"
     | "suppress"
     | "loadRecipientState"
@@ -78,7 +79,31 @@ function puedeResponder(
   return { ok: true };
 }
 
+/**
+ * Un entrante se marca atendido solo cuando la decisión llegó a un final.
+ *
+ * `duplicado` ya estaba marcado. `diferido` NO lo está a propósito: no se envió
+ * nada y la respuesta se sigue debiendo, así que debe poder reintentarse. Y si
+ * `resolver` lanza —falla el LLM, el handoff o el envío— no se marca nada y el
+ * evento queda elegible para reprocesarse: quedarse callado con alguien que
+ * escribió es peor que contestarle dos veces.
+ */
+function cerroElCiclo(resultado: ResultadoConversacion): boolean {
+  return resultado.accion !== "duplicado" && resultado.accion !== "diferido";
+}
+
 export async function manejarInbound(
+  deps: ConversacionDeps,
+  evento: InboundEvent,
+): Promise<ResultadoConversacion> {
+  const resultado = await resolver(deps, evento);
+  if (cerroElCiclo(resultado)) {
+    deps.store.marcarInboundAtendido(evento.waMessageId, deps.now());
+  }
+  return resultado;
+}
+
+async function resolver(
   deps: ConversacionDeps,
   evento: InboundEvent,
 ): Promise<ResultadoConversacion> {

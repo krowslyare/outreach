@@ -16,6 +16,14 @@ const { DatabaseSync } = require("node:sqlite") as typeof import("node:sqlite");
 
 export type SendStep = "first" | "fu1" | "fu2";
 
+/**
+ * Qué corresponde hacer con un entrante recién llegado.
+ *
+ * `pendiente` es el caso que evita perder un prospecto: la fila ya está guardada
+ * pero el trabajo posterior nunca terminó, así que hay que rehacerlo.
+ */
+export type RegistroInbound = "nuevo" | "pendiente" | "ya_atendido";
+
 type AccountStateRow = {
   campaign_started_at: string | null;
   kill_switch_tripped: number;
@@ -52,7 +60,11 @@ create table if not exists messages (
   inbound_class text,
   -- Solo en salientes de campaña. null en las respuestas libres del agente, que
   -- por eso no cuentan como follow-ups.
-  step text);
+  step text,
+  -- Solo en entrantes: cuándo se terminó de atender. Recibir no es atender: si
+  -- el LLM o el envío fallan después de guardar la fila, esto sigue nulo y el
+  -- evento puede reprocesarse.
+  handled_at text);
 
 -- Idempotencia de entrantes. Una reconexión de WhatsApp Web puede reemitir
 -- eventos ya procesados; sin esto el mismo mensaje se guarda dos veces y el
@@ -157,17 +169,29 @@ export class Store {
     }
     if (!columnas.has("step")) {
       this.db.exec("alter table messages add column step text");
-      // Los salientes anteriores a esta columna sí tienen el paso, embebido en
-      // la llave de idempotencia (`e164:step`). Rellenarlo deja una sola fuente
-      // de verdad para el conteo de follow-ups en vez de dos predicados que hay
-      // que mantener de acuerdo. El E.164 no contiene ':', así que el primer
-      // separador es el correcto.
-      this.db.exec(
-        `update messages
-         set step = substr(idempotency_key, instr(idempotency_key, ':') + 1)
-         where step is null and idempotency_key is not null`,
-      );
     }
+    if (!columnas.has("handled_at")) {
+      this.db.exec("alter table messages add column handled_at text");
+    }
+
+    // El relleno corre SIEMPRE, no dentro del `if` que agrega la columna. Un
+    // corte entre el `alter` —que commitea solo— y el relleno dejaría la
+    // siguiente arrancada viendo la columna ya presente y saltándose el relleno
+    // para siempre: los salientes de campaña quedarían con step nulo,
+    // followUpCount volvería a 0 y un fu1 ya enviado se elegiría una y otra vez
+    // para morir contra su propia llave de idempotencia, sin llegar nunca a fu2.
+    // Sobre una base al día no toca ninguna fila.
+    //
+    // Los salientes anteriores a esta columna sí tienen el paso, embebido en la
+    // llave de idempotencia (`e164:step`). Rellenarlo deja una sola fuente de
+    // verdad para el conteo de follow-ups en vez de dos predicados que hay que
+    // mantener de acuerdo. El E.164 no contiene ':', así que el primer
+    // separador es el correcto.
+    this.db.exec(
+      `update messages
+       set step = substr(idempotency_key, instr(idempotency_key, ':') + 1)
+       where step is null and idempotency_key is not null`,
+    );
   }
 
   close(): void {
@@ -474,7 +498,14 @@ export class Store {
   }
 
   /**
-   * Registra un entrante. Devuelve false si ya estaba registrado.
+   * Registra un entrante y dice qué corresponde hacer con él.
+   *
+   * "Recibido" y "atendido" son estados distintos a propósito. Si se tratara
+   * cualquier fila ya existente como procesada, un fallo del LLM, del handoff o
+   * del envío —que ocurren DESPUÉS de este insert— dejaría el mensaje guardado y
+   * sin responder para siempre: una reconexión reemitiría el evento y este
+   * método lo descartaría por duplicado. Un prospecto diciendo "sí, me
+   * interesa" quedaría sin respuesta, que es peor que contestarle dos veces.
    *
    * `clase` por defecto 'humano' a propósito: ausente debe significar el lado
    * conservador, que es cortar la cadencia. Un llamador que no clasifica no
@@ -486,7 +517,7 @@ export class Store {
     body: string,
     at: Date,
     meta: { waMessageId?: string | null; clase?: ClaseInbound } = {},
-  ): boolean {
+  ): RegistroInbound {
     this.ensureInboundRecipient(e164, at);
     const waMessageId = meta.waMessageId ?? null;
     // La idempotencia se consulta antes de insertar en vez de depender del
@@ -495,9 +526,13 @@ export class Store {
     // mensaje de la excepción es frágil.
     if (waMessageId !== null) {
       const existing = this.db
-        .prepare("select id from messages where wa_message_id = ?")
-        .get(waMessageId);
-      if (existing !== undefined) return false;
+        .prepare("select handled_at from messages where wa_message_id = ?")
+        .get(waMessageId) as { handled_at: string | null } | undefined;
+      if (existing !== undefined) {
+        // No se vuelve a insertar: la fila ya está y el historial la incluye.
+        // Solo cambia si hay que rehacer el trabajo que quedó a medias.
+        return existing.handled_at === null ? "pendiente" : "ya_atendido";
+      }
     }
 
     this.db
@@ -514,7 +549,24 @@ export class Store {
         at.toISOString(),
         at.toISOString(),
       );
-    return true;
+    return "nuevo";
+  }
+
+  /**
+   * Marca un entrante como atendido de punta a punta.
+   *
+   * Se llama recién cuando la decisión llegó a un final: se respondió, se
+   * escaló, se suprimió o se descartó con motivo. Mientras esto no corra, el
+   * evento sigue siendo elegible para reprocesarse.
+   */
+  marcarInboundAtendido(waMessageId: string, at: Date): void {
+    this.db
+      .prepare(
+        `update messages
+         set handled_at = ?
+         where wa_message_id = ? and direction = 'in' and handled_at is null`,
+      )
+      .run(at.toISOString(), waMessageId);
   }
 
   /**
