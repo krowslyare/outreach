@@ -17,17 +17,31 @@ interface Argumentos {
   max?: number;
   dryRun: boolean;
   solo?: string;
+  escuchar: boolean;
+  sinTanda: boolean;
 }
 
 function parseArgs(args: readonly string[]): Argumentos {
   let max: number | undefined;
   let dryRun = false;
   let solo: string | undefined;
+  let escuchar = false;
+  let sinTanda = false;
 
   for (let indice = 0; indice < args.length; indice += 1) {
     const argumento = args[indice]!;
     if (argumento === "--dry-run") {
       dryRun = true;
+      continue;
+    }
+    if (argumento === "--escuchar") {
+      escuchar = true;
+      continue;
+    }
+    if (argumento === "--sin-tanda") {
+      // Implica escuchar: un proceso que ni envía ni escucha no hace nada.
+      sinTanda = true;
+      escuchar = true;
       continue;
     }
 
@@ -65,7 +79,34 @@ function parseArgs(args: readonly string[]): Argumentos {
     throw new Error(`argumento desconocido: ${argumento}`);
   }
 
-  return { max, dryRun, solo };
+  if (escuchar && dryRun) {
+    throw new Error(
+      "--escuchar no tiene sentido con --dry-run: el dry-run no inicia WhatsApp, " +
+        "así que no hay nada que escuchar.",
+    );
+  }
+
+  return { max, dryRun, solo, escuchar, sinTanda };
+}
+
+/**
+ * Mantiene el proceso vivo hasta Ctrl-C.
+ *
+ * Sin esto, la tanda terminaba y el proceso salía llevándose el listener: las
+ * respuestas del prospecto llegaban al teléfono sin nadie escuchando, y los ACK
+ * —que llegan segundos DESPUÉS del envío— no se registraban nunca. Eso último
+ * dejaba `deviceRate` permanentemente en null, o sea el kill switch ciego por
+ * construcción.
+ */
+function esperarInterrupcion(): Promise<void> {
+  return new Promise((resolve) => {
+    const terminar = (): void => {
+      console.info("\nCerrando la sesión...");
+      resolve();
+    };
+    process.once("SIGINT", terminar);
+    process.once("SIGTERM", terminar);
+  });
 }
 
 function delay(milliseconds: number): Promise<void> {
@@ -189,21 +230,25 @@ try {
     client = wa;
   }
 
-  const resumen = await ejecutarTanda(
-    {
-      store,
-      proveedor,
-      client,
-      config,
-      now: () => new Date(),
-      sleep: delay,
-      random: Math.random,
-      log: (mensaje) => console.info(mensaje),
-    },
-    { max: argumentos.max, dryRun: argumentos.dryRun, solo: argumentos.solo },
-  );
+  const resumen = argumentos.sinTanda
+    ? null
+    : await ejecutarTanda(
+        {
+          store,
+          proveedor,
+          client,
+          config,
+          now: () => new Date(),
+          sleep: delay,
+          random: Math.random,
+          log: (mensaje) => console.info(mensaje),
+        },
+        { max: argumentos.max, dryRun: argumentos.dryRun, solo: argumentos.solo },
+      );
 
-  if (argumentos.dryRun) {
+  if (resumen === null) {
+    console.info("Sin tanda: solo se queda escuchando.");
+  } else if (argumentos.dryRun) {
     for (const mensaje of resumen.mensajesCompuestos) {
       console.info(
         `\n${mensaje.nombre} — ${mensaje.e164} [${mensaje.paso}]\n${mensaje.texto}`,
@@ -211,18 +256,30 @@ try {
     }
   }
 
-  console.info("\nResumen de tanda:");
-  console.info(`  enviados: ${resumen.enviados}`);
-  console.info(
-    `  saltados por destinatario: ${resumen.saltadosPorDestinatario}`,
-  );
-  console.info(`  fallos de composición: ${resumen.fallosComposicion}`);
-  if (argumentos.dryRun) {
+  if (resumen !== null) {
+    console.info("\nResumen de tanda:");
+    console.info(`  enviados: ${resumen.enviados}`);
     console.info(
-      `  mensajes compuestos para revisión: ${resumen.mensajesCompuestos.length}`,
+      `  saltados por destinatario: ${resumen.saltadosPorDestinatario}`,
     );
+    console.info(`  fallos de composición: ${resumen.fallosComposicion}`);
+    if (argumentos.dryRun) {
+      console.info(
+        `  mensajes compuestos para revisión: ${resumen.mensajesCompuestos.length}`,
+      );
+    }
+    console.info(`  terminó por: ${resumen.motivoTerminacion}`);
   }
-  console.info(`  terminó por: ${resumen.motivoTerminacion}`);
+
+  if (argumentos.escuchar) {
+    console.info(
+      "\nEscuchando respuestas y ACKs. Ctrl-C para salir.\n" +
+        "  Mientras esto corra: las respuestas van al agente y los ACK alimentan\n" +
+        "  deviceRate, que es la señal del kill switch. Si el proceso no está\n" +
+        "  vivo, ninguna de las dos cosas ocurre.",
+    );
+    await esperarInterrupcion();
+  }
 } finally {
   if (wa !== null) await wa.stop();
   store.close();
