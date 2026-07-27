@@ -9,6 +9,7 @@
   "scripts": {
     "campana": "tsx src/cli/campana.ts",
     "harvest": "tsx src/cli/harvest.ts",
+    "sembrar": "tsx src/cli/sembrar.ts",
     "test": "vitest run --passWithNoTests",
     "test:watch": "vitest",
     "typecheck": "tsc --noEmit"
