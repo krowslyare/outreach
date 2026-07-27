@@ -37,6 +37,7 @@ function recipient(
     firstOutboundAt: null,
     lastOutboundAt: null,
     lastInboundAt: null,
+    lastHumanInboundAt: null,
     followUpCount: 0,
     ...overrides,
   };

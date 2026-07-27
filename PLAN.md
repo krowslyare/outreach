@@ -16,6 +16,7 @@ El cierre lo haces tú. Todo lo anterior corre solo.
 | Canal 1er toque | WhatsApp directo, riesgo asumido | Es donde están, y una empresa sin web no tiene email corporativo. IG descartado: no hay cuenta creada. |
 | Volumen | 10-20/día | Ritmo humano. Suficiente para validar el pitch antes de escalar. |
 | Meta del agente | Agendar tu llamada, **no vender** | Sin links de pago, sin cierre. Simplifica mucho el agente. |
+| Autorespondedores | **Clasificar el entrante**, no partir el primer mensaje | Casi todo establecimiento tiene saludo automático de WhatsApp Business y llega a los segundos del primer contacto. La alternativa evaluada era mandar un "Buenas" para quemar el saludo y el pitch 15s después; se descartó porque choca contra cinco cosas (separación mínima de 180s, llave de idempotencia del paso, conteo de follow-ups, la consulta de candidatos y el propio `canContact`), duplica los salientes —de 15 contactos/día a 7— y deja un estado nuevo donde una caída del proceso deja al prospecto con un "Buenas" pelado. Detalle abajo. |
 
 ## Módulos
 
@@ -84,6 +85,44 @@ El pacing NO es la protección principal. El dominante es la **tasa de bloqueos*
 - [ ] Tasa de respuesta a 72h: alarma **secundaria**, para pausar una campaña, no el número.
 - [ ] Reemplazo del número ~1 por trimestre = costo de operación. Riesgo estimado de
       pérdida: 15-30% en los primeros 90 días corriendo continuo.
+
+## Entrantes automáticos — por qué la cadencia se moría sola
+
+El **mensaje de bienvenida** de WhatsApp Business se dispara una sola vez por
+contacto y se rehabilita recién tras 14 días de inactividad. O sea: llega una vez,
+en el primer contacto, y los follow-ups de día 3 y día 7 no lo vuelven a
+disparar. El **mensaje de ausencia** es otra cosa —se dispara fuera del horario
+que el negocio configuró— y no está confirmado con qué frecuencia se repite. Para
+el sistema los dos son lo mismo: `automatico`.
+
+El daño nunca estuvo en el chat: el prospecto recibe el pitch completo y lo lee
+igual. Estaba en nuestra contabilidad. Un saludo automático seteaba
+`lastInboundAt`, y con eso:
+
+1. `canContact` negaba para siempre → **ningún follow-up de la lista se enviaba**,
+   y cada prospecto figuraba en el log como "ya respondió", que es justo lo que
+   uno espera ver.
+2. La consulta de candidatos lo excluía por SQL, así que arreglar solo
+   `canContact` no alcanzaba.
+3. Se gastaba una llamada al LLM con esfuerzo alto contestándole a un robot.
+4. "En breve un asesor lo atenderá" leído por el agente puede parecer interés y
+   escalar un lead que no existe.
+
+El criterio vive en `src/wa/clasificar.ts` y está **sesgado a "humano"**. Marca
+`automatico` solo si se cumple todo: llegó dentro de 60s de nuestro saliente, es
+texto plano, no cita nuestro mensaje, no trae media, y hace match con una frase de
+plantilla. Cualquier duda cae en humano.
+
+La asimetría es la razón del sesgo: tratar a una persona como robot significa
+seguir mandándole follow-ups a alguien que ya contestó —grosero, y quema el
+prospecto—. Tratar a un robot como persona cuesta dos follow-ups. Solo latencia no
+alcanza: una recepcionista mirando el chat contesta "¿de qué se trata?" en menos
+de diez segundos.
+
+Se arreglaron dos bugs que estaban tapados por el anterior: `followUpCount`
+contaba las respuestas libres del agente como follow-ups, y los entrantes no
+tenían idempotencia, así que una reconexión de WhatsApp Web podía hacer que el
+agente contestara dos veces el mismo mensaje.
 
 ## Motor de seguridad — determinista y FUERA del agente
 

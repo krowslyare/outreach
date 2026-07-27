@@ -1,6 +1,7 @@
 import { createRequire } from "node:module";
 
 import type { ScoredProspect } from "../types.js";
+import type { ClaseInbound } from "./clasificar.js";
 import type {
   AccountHealth,
   KillSwitchState,
@@ -14,6 +15,14 @@ const require = createRequire(import.meta.url);
 const { DatabaseSync } = require("node:sqlite") as typeof import("node:sqlite");
 
 export type SendStep = "first" | "fu1" | "fu2";
+
+/**
+ * Qué corresponde hacer con un entrante recién llegado.
+ *
+ * `pendiente` es el caso que evita perder un prospecto: la fila ya está guardada
+ * pero el trabajo posterior nunca terminó, así que hay que rehacerlo.
+ */
+export type RegistroInbound = "nuevo" | "pendiente" | "ya_atendido";
 
 type AccountStateRow = {
   campaign_started_at: string | null;
@@ -46,7 +55,25 @@ create table if not exists messages (
   id integer primary key autoincrement, e164 text not null references recipients(e164),
   direction text not null check (direction in ('out','in')), body text not null,
   idempotency_key text unique, wa_message_id text, sent_at text,
-  ack integer, ack_at text, error text, created_at text not null);
+  ack integer, ack_at text, error text, created_at text not null,
+  -- Solo en entrantes: 'humano' o 'automatico'. Ver clasificar.ts.
+  inbound_class text,
+  -- Solo en salientes de campaña. null en las respuestas libres del agente, que
+  -- por eso no cuentan como follow-ups.
+  step text,
+  -- Solo en entrantes: cuándo se terminó de atender. Recibir no es atender: si
+  -- el LLM o el envío fallan después de guardar la fila, esto sigue nulo y el
+  -- evento puede reprocesarse.
+  handled_at text);
+
+-- Idempotencia de entrantes. Una reconexión de WhatsApp Web puede reemitir
+-- eventos ya procesados; sin esto el mismo mensaje se guarda dos veces y el
+-- agente lo contesta dos veces. Los salientes ya se protegen con
+-- idempotency_key, pero su wa_message_id también es único, así que el índice
+-- cubre ambas direcciones. SQLite permite varios null, que es lo que necesitan
+-- los salientes todavía no enviados.
+create unique index if not exists idx_messages_wa_message_id
+  on messages(wa_message_id);
 
 create table if not exists account_state (
   id integer primary key check (id = 1), campaign_started_at text,
@@ -113,6 +140,7 @@ export class Store {
     this.db = new DatabaseSync(filename);
     this.db.exec("pragma foreign_keys = on;");
     this.db.exec(SCHEMA);
+    this.migrar();
     this.db
       .prepare(
         `insert into account_state (id)
@@ -120,6 +148,50 @@ export class Store {
          on conflict (id) do nothing`,
       )
       .run();
+  }
+
+  /**
+   * Agrega columnas nuevas a una base que ya existe.
+   *
+   * `create table if not exists` no toca una tabla ya creada, así que sin esto
+   * una base de una versión anterior sigue corriendo sin las columnas y las
+   * consultas fallan en runtime. Se lee el esquema real en vez de intentar el
+   * `alter` y tragarse el error: así una falla distinta sigue siendo visible.
+   */
+  private migrar(): void {
+    const columnas = new Set(
+      (this.db.prepare("pragma table_info(messages)").all() as Array<{
+        name: string;
+      }>).map((fila) => fila.name),
+    );
+    if (!columnas.has("inbound_class")) {
+      this.db.exec("alter table messages add column inbound_class text");
+    }
+    if (!columnas.has("step")) {
+      this.db.exec("alter table messages add column step text");
+    }
+    if (!columnas.has("handled_at")) {
+      this.db.exec("alter table messages add column handled_at text");
+    }
+
+    // El relleno corre SIEMPRE, no dentro del `if` que agrega la columna. Un
+    // corte entre el `alter` —que commitea solo— y el relleno dejaría la
+    // siguiente arrancada viendo la columna ya presente y saltándose el relleno
+    // para siempre: los salientes de campaña quedarían con step nulo,
+    // followUpCount volvería a 0 y un fu1 ya enviado se elegiría una y otra vez
+    // para morir contra su propia llave de idempotencia, sin llegar nunca a fu2.
+    // Sobre una base al día no toca ninguna fila.
+    //
+    // Los salientes anteriores a esta columna sí tienen el paso, embebido en la
+    // llave de idempotencia (`e164:step`). Rellenarlo deja una sola fuente de
+    // verdad para el conteo de follow-ups en vez de dos predicados que hay que
+    // mantener de acuerdo. El E.164 no contiene ':', así que el primer
+    // separador es el correcto.
+    this.db.exec(
+      `update messages
+       set step = substr(idempotency_key, instr(idempotency_key, ':') + 1)
+       where step is null and idempotency_key is not null`,
+    );
   }
 
   close(): void {
@@ -208,11 +280,27 @@ export class Store {
          where e164 = ? and direction = 'in'`,
       )
       .get(e164) as MessageTimeRow;
+    // Separado del anterior a propósito: `lastInboundAt` queda como rastro de
+    // auditoría de TODO lo que entró, y solo éste decide sobre la cadencia. Un
+    // saludo automático de WhatsApp Business no es el prospecto respondiendo.
+    const humanInbound = this.db
+      .prepare(
+        `select max(coalesce(sent_at, created_at)) as sent_at
+         from messages
+         where e164 = ? and direction = 'in'
+           and coalesce(inbound_class, 'humano') = 'humano'`,
+      )
+      .get(e164) as MessageTimeRow;
+    // Solo los pasos de campaña. Las respuestas del agente son salientes
+    // enviados igual, pero contarlas hacía que dos o tres respuestas a un
+    // prospecto lo empujaran por encima de maxFollowUps y lo sacaran de la
+    // secuencia sin que nadie hubiera mandado un solo follow-up.
     const sentCount = this.db
       .prepare(
         `select count(*) as count
          from messages
-         where e164 = ? and direction = 'out' and sent_at is not null`,
+         where e164 = ? and direction = 'out' and sent_at is not null
+           and step is not null`,
       )
       .get(e164) as { count: number };
 
@@ -223,6 +311,7 @@ export class Store {
       firstOutboundAt: asDate(firstOutbound.sent_at),
       lastOutboundAt: asDate(outbound.sent_at),
       lastInboundAt: asDate(inbound.sent_at),
+      lastHumanInboundAt: asDate(humanInbound.sent_at),
       followUpCount: Math.max(0, sentCount.count - 1),
     };
   }
@@ -334,10 +423,10 @@ export class Store {
       const result = this.db
         .prepare(
           `insert into messages (
-             e164, direction, body, idempotency_key, created_at
-           ) values (?, 'out', ?, ?, ?)`,
+             e164, direction, body, idempotency_key, step, created_at
+           ) values (?, 'out', ?, ?, ?, ?)`,
         )
-        .run(e164, body, idempotencyKey, this.clock().toISOString());
+        .run(e164, body, idempotencyKey, step, this.clock().toISOString());
       return Number(result.lastInsertRowid);
     } catch (error) {
       // Solo el choque de ESTA llave significa "ya intentado". Una FK u otra
@@ -390,21 +479,105 @@ export class Store {
       .run(ack, at.toISOString(), waMessageId, ack);
   }
 
-  recordInbound(e164: string, body: string, at: Date): void {
+  /**
+   * Último saliente enviado a este número, o null.
+   *
+   * A diferencia de `loadRecipientState`, no exige que el destinatario exista:
+   * hay que poder correlacionar un entrante antes de crear su stub, y para un
+   * número ajeno a la campaña la respuesta correcta es null, no una excepción.
+   */
+  ultimoOutboundAt(e164: string): Date | null {
+    const fila = this.db
+      .prepare(
+        `select max(sent_at) as sent_at
+         from messages
+         where e164 = ? and direction = 'out' and sent_at is not null`,
+      )
+      .get(e164) as MessageTimeRow;
+    return asDate(fila.sent_at);
+  }
+
+  /**
+   * Registra un entrante y dice qué corresponde hacer con él.
+   *
+   * "Recibido" y "atendido" son estados distintos a propósito. Si se tratara
+   * cualquier fila ya existente como procesada, un fallo del LLM, del handoff o
+   * del envío —que ocurren DESPUÉS de este insert— dejaría el mensaje guardado y
+   * sin responder para siempre: una reconexión reemitiría el evento y este
+   * método lo descartaría por duplicado. Un prospecto diciendo "sí, me
+   * interesa" quedaría sin respuesta, que es peor que contestarle dos veces.
+   *
+   * `clase` por defecto 'humano' a propósito: ausente debe significar el lado
+   * conservador, que es cortar la cadencia. Un llamador que no clasifica no
+   * debería, por omisión, dejar a un prospecto recibiendo follow-ups después de
+   * haber contestado.
+   */
+  recordInbound(
+    e164: string,
+    body: string,
+    at: Date,
+    meta: { waMessageId?: string | null; clase?: ClaseInbound } = {},
+  ): RegistroInbound {
     this.ensureInboundRecipient(e164, at);
+    const waMessageId = meta.waMessageId ?? null;
+    // La idempotencia se consulta antes de insertar en vez de depender del
+    // choque del índice: el insert corre dentro de la misma llamada que crea el
+    // stub del destinatario, y distinguir "duplicado" de un error real por el
+    // mensaje de la excepción es frágil.
+    if (waMessageId !== null) {
+      const existing = this.db
+        .prepare("select handled_at from messages where wa_message_id = ?")
+        .get(waMessageId) as { handled_at: string | null } | undefined;
+      if (existing !== undefined) {
+        // No se vuelve a insertar: la fila ya está y el historial la incluye.
+        // Solo cambia si hay que rehacer el trabajo que quedó a medias.
+        return existing.handled_at === null ? "pendiente" : "ya_atendido";
+      }
+    }
+
     this.db
       .prepare(
         `insert into messages (
-           e164, direction, body, sent_at, created_at
-         ) values (?, 'in', ?, ?, ?)`,
+           e164, direction, body, wa_message_id, inbound_class, sent_at, created_at
+         ) values (?, 'in', ?, ?, ?, ?, ?)`,
       )
-      .run(e164, body, at.toISOString(), at.toISOString());
+      .run(
+        e164,
+        body,
+        waMessageId,
+        meta.clase ?? "humano",
+        at.toISOString(),
+        at.toISOString(),
+      );
+    return "nuevo";
+  }
+
+  /**
+   * Marca un entrante como atendido de punta a punta.
+   *
+   * Se llama recién cuando la decisión llegó a un final: se respondió, se
+   * escaló, se suprimió o se descartó con motivo. Mientras esto no corra, el
+   * evento sigue siendo elegible para reprocesarse.
+   */
+  marcarInboundAtendido(waMessageId: string, at: Date): void {
+    this.db
+      .prepare(
+        `update messages
+         set handled_at = ?
+         where wa_message_id = ? and direction = 'in' and handled_at is null`,
+      )
+      .run(at.toISOString(), waMessageId);
   }
 
   /**
    * La conversación en orden cronológico, para armar el historial del agente.
    * Solo mensajes efectivamente enviados o recibidos: un saliente reclamado
    * pero nunca enviado no forma parte de lo que el prospecto vio.
+   *
+   * Los entrantes automáticos quedan fuera: se registran para auditoría, pero
+   * ponerlos en el historial le da al agente un turno del "prospecto" que el
+   * prospecto nunca escribió. "En breve un asesor lo atenderá" leído como
+   * intención es exactamente el falso positivo que hay que evitar.
    */
   loadConversacion(e164: string): Array<{ direction: "in" | "out"; body: string }> {
     return this.db
@@ -412,7 +585,10 @@ export class Store {
         `select direction, body
          from messages
          where e164 = ?
-           and (direction = 'in' or sent_at is not null)
+           and (
+             (direction = 'in' and coalesce(inbound_class, 'humano') = 'humano')
+             or (direction = 'out' and sent_at is not null)
+           )
          order by coalesce(sent_at, created_at) asc, id asc`,
       )
       .all(e164) as Array<{ direction: "in" | "out"; body: string }>;
@@ -487,6 +663,12 @@ export class Store {
    * respondió: si alguien contestó, la cadencia automática se terminó y lo que
    * corresponde es responderle, no seguir empujando la secuencia.
    *
+   * "Respondió" significa un entrante HUMANO. Filtrar por cualquier entrante
+   * dejaba fuera a todo el que tuviera saludo automático de WhatsApp Business
+   * configurado —casi todos— y esos follow-ups no se enviaban jamás. Este
+   * filtro tiene que decir lo mismo que canContact: si divergen, un candidato
+   * pasa la consulta y muere en la puerta, o al revés.
+   *
    * Excluye también los stubs de inbound: nunca fueron prospectos de campaña.
    */
   candidatosParaContactar(
@@ -503,6 +685,7 @@ export class Store {
            and not exists (
              select 1 from messages m
              where m.e164 = r.e164 and m.direction = 'in'
+               and coalesce(m.inbound_class, 'humano') = 'humano'
            )
          order by r.score desc nulls last, r.e164 asc
          limit ? offset ?`,

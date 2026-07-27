@@ -2,6 +2,7 @@ import { describe, expect, it, vi } from "vitest";
 
 import type { ContextoProspecto } from "../agent/prompt.js";
 import type { ProveedorLLM, RespuestaLLM } from "../llm/port.js";
+import type { InboundEvent } from "../wa/client.js";
 import type { AccountHealth, RecipientState } from "../wa/types.js";
 import {
   manejarInbound,
@@ -27,6 +28,7 @@ const ESTADO: RecipientState = {
   firstOutboundAt: null,
   lastOutboundAt: null,
   lastInboundAt: null,
+  lastHumanInboundAt: null,
   followUpCount: 0,
 };
 
@@ -58,6 +60,27 @@ interface OpcionesDobles {
   respuesta?: RespuestaLLM;
   historial?: Array<{ direction: "in" | "out"; body: string }>;
   now?: Date;
+  ultimoOutboundAt?: Date | null;
+}
+
+let contadorEventos = 0;
+
+function eventoInbound(
+  body: string,
+  overrides: Partial<InboundEvent> = {},
+): InboundEvent {
+  return {
+    e164: E164,
+    body,
+    at: EN_HORARIO,
+    // Único por evento: repetirlo activaría la idempotencia y las pruebas
+    // medirían el corte por duplicado en vez de lo que quieren medir.
+    waMessageId: `wa-in-${++contadorEventos}`,
+    tipo: "chat",
+    tieneMedia: false,
+    citaOtroMensaje: false,
+    ...overrides,
+  };
 }
 
 function crearDobles(opciones: OpcionesDobles = {}) {
@@ -71,6 +94,10 @@ function crearDobles(opciones: OpcionesDobles = {}) {
     .mockResolvedValue("wa-mensaje-1");
 
   const store: ConversacionDeps["store"] = {
+    // Sin saliente previo, el clasificador no tiene con qué correlacionar y
+    // trata todo como humano: es el default de estos casos salvo que la prueba
+    // diga otra cosa.
+    ultimoOutboundAt: vi.fn(() => opciones.ultimoOutboundAt ?? null),
     recordInbound: vi.fn((e164, body) => {
       // El store real incorpora el inbound antes de cargar el historial; el
       // doble replica eso para probar el último turno que realmente ve el agente.
@@ -87,8 +114,10 @@ function crearDobles(opciones: OpcionesDobles = {}) {
           resenas: null,
         };
       }
+      return "nuevo" as const;
     }),
     suppress: vi.fn(),
+    marcarInboundAtendido: vi.fn(),
     loadRecipientState: vi.fn(() => ({
       ...ESTADO,
       ...opciones.estado,
@@ -136,13 +165,14 @@ describe("manejarInbound", () => {
     const info = vi.spyOn(console, "info").mockImplementation(() => undefined);
 
     await expect(
-      manejarInbound(deps, E164, "No me escribas más", EN_HORARIO),
+      manejarInbound(deps, eventoInbound("No me escribas más")),
     ).resolves.toEqual({ accion: "suprimido" });
 
     expect(store.recordInbound).toHaveBeenCalledWith(
       E164,
       "No me escribas más",
       EN_HORARIO,
+      expect.objectContaining({ clase: "humano" }),
     );
     expect(store.suppress).toHaveBeenCalledWith(E164, "opt-out detectado");
     // Un opt-out es una orden absoluta: ni siquiera debe llegar al componente
@@ -159,7 +189,7 @@ describe("manejarInbound", () => {
     });
 
     await expect(
-      manejarInbound(deps, E164, "Hola, quisiera información", EN_HORARIO),
+      manejarInbound(deps, eventoInbound("Hola, quisiera información")),
     ).resolves.toEqual({
       accion: "ignorado",
       razon: "número fuera de la campaña",
@@ -175,7 +205,7 @@ describe("manejarInbound", () => {
     });
 
     await expect(
-      manejarInbound(deps, E164, "¿A qué hora conversamos?", EN_HORARIO),
+      manejarInbound(deps, eventoInbound("¿A qué hora conversamos?")),
     ).resolves.toEqual({
       accion: "ignorado",
       razon: "conversación tomada por humano",
@@ -193,7 +223,7 @@ describe("manejarInbound", () => {
     });
 
     await expect(
-      manejarInbound(deps, E164, "¿Siguen ahí?", EN_HORARIO),
+      manejarInbound(deps, eventoInbound("¿Siguen ahí?")),
     ).resolves.toEqual({
       accion: "ignorado",
       razon: "destinatario suprimido",
@@ -207,7 +237,7 @@ describe("manejarInbound", () => {
     const { deps, store, enviar } = crearDobles();
 
     await expect(
-      manejarInbound(deps, E164, "Cuénteme más", EN_HORARIO),
+      manejarInbound(deps, eventoInbound("Cuénteme más")),
     ).resolves.toEqual({
       accion: "respondido",
       texto: "Claro, le cuento cómo funciona.",
@@ -228,13 +258,11 @@ describe("manejarInbound", () => {
 
   it("difiere una respuesta fuera de horario para no delatar al bot", async () => {
     const madrugada = new Date("2026-07-27T08:00:00.000Z"); // lunes, 03:00 en Lima
-    const { deps, enviar } = crearDobles({ now: madrugada });
+    const { deps, store, enviar } = crearDobles({ now: madrugada });
 
     const resultado = await manejarInbound(
       deps,
-      E164,
-      "Cuénteme más",
-      madrugada,
+      eventoInbound("Cuénteme más", { at: madrugada }),
     );
 
     expect(resultado).toMatchObject({ accion: "diferido" });
@@ -242,6 +270,35 @@ describe("manejarInbound", () => {
       "fuera de la ventana horaria",
     );
     expect(enviar).not.toHaveBeenCalled();
+    // No se envió nada, así que la respuesta se sigue debiendo: marcarlo
+    // atendido lo descartaría para siempre en la próxima reconexión.
+    expect(store.marcarInboundAtendido).not.toHaveBeenCalled();
+  });
+
+  // El P1 del review: si el LLM, el handoff o el envío fallan DESPUÉS de que la
+  // fila se guardó, el evento no puede quedar marcado como atendido — si no, una
+  // reconexión lo descarta por duplicado y el prospecto nunca recibe respuesta.
+  it("no marca atendido un inbound cuyo procesamiento falló", async () => {
+    const { deps, store, enviar } = crearDobles();
+    enviar.mockRejectedValueOnce(new Error("WhatsApp se cayó"));
+
+    await expect(
+      manejarInbound(deps, eventoInbound("Sí, me interesa")),
+    ).rejects.toThrow("WhatsApp se cayó");
+
+    expect(store.marcarInboundAtendido).not.toHaveBeenCalled();
+  });
+
+  it("marca atendido un inbound que llegó a un final", async () => {
+    const { deps, store } = crearDobles();
+    const evento = eventoInbound("Cuénteme más");
+
+    await manejarInbound(deps, evento);
+
+    expect(store.marcarInboundAtendido).toHaveBeenCalledWith(
+      evento.waMessageId,
+      EN_HORARIO,
+    );
   });
 
   it("difiere una respuesta cuando el kill switch está activo", async () => {
@@ -255,12 +312,7 @@ describe("manejarInbound", () => {
       },
     });
 
-    const resultado = await manejarInbound(
-      deps,
-      E164,
-      "Cuénteme más",
-      EN_HORARIO,
-    );
+    const resultado = await manejarInbound(deps, eventoInbound("Cuénteme más"));
 
     expect(resultado).toEqual({
       accion: "diferido",
@@ -275,7 +327,7 @@ describe("manejarInbound", () => {
     });
 
     await expect(
-      manejarInbound(deps, E164, "Cuénteme más", EN_HORARIO),
+      manejarInbound(deps, eventoInbound("Cuénteme más")),
     ).resolves.toMatchObject({ accion: "respondido" });
 
     // El tope controla iniciativa fría. Quien ya escribió dejó de ser un
@@ -299,7 +351,7 @@ describe("manejarInbound", () => {
     });
 
     await expect(
-      manejarInbound(deps, E164, "¿Podemos reunirnos?", EN_HORARIO),
+      manejarInbound(deps, eventoInbound("¿Podemos reunirnos?")),
     ).resolves.toEqual({
       accion: "escalado",
       motivo: "pide_reunion",
@@ -327,7 +379,7 @@ describe("manejarInbound", () => {
     });
 
     await expect(
-      manejarInbound(deps, E164, "Ya trabajamos con otra empresa", EN_HORARIO),
+      manejarInbound(deps, eventoInbound("Ya trabajamos con otra empresa")),
     ).resolves.toEqual({
       accion: "perdido",
       motivo: "ya_tiene_proveedor",
@@ -348,7 +400,7 @@ describe("manejarInbound", () => {
       ],
     });
 
-    await manejarInbound(deps, E164, "Último mensaje", EN_HORARIO);
+    await manejarInbound(deps, eventoInbound("Último mensaje"));
 
     const solicitud = generar.mock.calls[0]?.[0];
     const mensajes = solicitud?.mensajes;

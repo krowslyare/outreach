@@ -92,7 +92,7 @@ try {
     wa.onAck((waMessageId, ack, at) => {
       store.recordAck(waMessageId, ack, at);
     });
-    wa.onInbound((e164, body, at) => {
+    wa.onInbound((evento) => {
       // Va al ORQUESTADOR, no a handleInbound. handleInbound solo registra y
       // aplica el opt-out; manejarInbound es el único camino que llama al
       // agente y ejecuta el handoff. Con el de bajo nivel, un prospecto que
@@ -108,12 +108,10 @@ try {
           now: () => new Date(),
           log: (mensaje) => console.log(`[inbound] ${mensaje}`),
         },
-        e164,
-        body,
-        at,
+        evento,
       ).catch((error: unknown) => {
         // Un fallo atendiendo un inbound no debe tumbar la tanda saliente.
-        console.error(`[inbound] error atendiendo ${e164}:`, error);
+        console.error(`[inbound] error atendiendo ${evento.e164}:`, error);
       });
     });
     wa.onFatal((reason) => {

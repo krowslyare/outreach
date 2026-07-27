@@ -1,7 +1,26 @@
 import qrcode from "qrcode-terminal";
 import WhatsAppWeb from "whatsapp-web.js";
 
-export type InboundHandler = (e164: string, body: string, at: Date) => void;
+/**
+ * Un entrante con lo que hace falta para clasificarlo.
+ *
+ * Antes se pasaban solo `e164`, `body` y `at`, y el resto de la metadata moría
+ * acá. Sin `tipo`/`tieneMedia`/`citaOtroMensaje` no hay forma de distinguir un
+ * saludo automático de una persona salvo adivinando por el texto, y sin
+ * `waMessageId` un evento reemitido tras una reconexión se procesa dos veces.
+ */
+export interface InboundEvent {
+  e164: string;
+  body: string;
+  at: Date;
+  waMessageId: string;
+  /** `Message.type`: "chat" es texto plano; "ptt" audio, "image", "sticker"... */
+  tipo: string;
+  tieneMedia: boolean;
+  citaOtroMensaje: boolean;
+}
+
+export type InboundHandler = (evento: InboundEvent) => void;
 export type AckHandler = (
   waMessageId: string,
   ack: number,
@@ -100,8 +119,17 @@ export class WhatsAppWebClient implements WaClient {
       // El timestamp del evento conserva cuándo escribió el prospecto aunque
       // el proceso haya estado ocupado antes de despachar el callback.
       const at = new Date(message.timestamp * 1_000);
+      const evento: InboundEvent = {
+        e164,
+        body: message.body,
+        at,
+        waMessageId: message.id._serialized,
+        tipo: String(message.type),
+        tieneMedia: message.hasMedia === true,
+        citaOtroMensaje: message.hasQuotedMsg === true,
+      };
       for (const handler of this.inboundHandlers) {
-        handler(e164, message.body, at);
+        handler(evento);
       }
     });
     this.client.on(

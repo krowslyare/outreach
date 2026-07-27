@@ -193,7 +193,13 @@ export function canContact(
 
   // Si contestó, la cadencia automática se termina: responder es trabajo del
   // agente sobre lo que dijo, no del secuenciador.
-  if (recipient.lastInboundAt !== null) {
+  //
+  // Solo cuenta el entrante HUMANO. Mirar `lastInboundAt` incluía el saludo
+  // automático de WhatsApp Business, que llega a los segundos del primer
+  // contacto y que tiene configurado casi todo establecimiento: con eso, ningún
+  // follow-up de la lista se enviaba nunca y cada prospecto figuraba como "ya
+  // respondió", que es justo lo que uno espera ver en el log.
+  if (recipient.lastHumanInboundAt !== null) {
     return DENY("el destinatario respondió: fuera de la cadencia automática");
   }
 

@@ -50,6 +50,7 @@ function fakeDeps(options: {
           firstOutboundAt: null,
           lastOutboundAt: null,
           lastInboundAt: null,
+          lastHumanInboundAt: null,
           followUpCount: 0,
         };
       },
@@ -114,6 +115,7 @@ function concurrentDeps(options: {
         firstOutboundAt: null,
         lastOutboundAt: null,
         lastInboundAt: null,
+        lastHumanInboundAt: null,
         followUpCount: 0,
       }),
       claimSend: () => nextMessageId++,
