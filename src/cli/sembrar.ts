@@ -9,6 +9,8 @@
 // prospecto real —importRecipients, no un insert aparte— para que la prueba
 // ejercite el código que se va a usar en producción y no una ruta paralela.
 
+import "./env.js";
+
 import type { ScoredProspect } from "../types.js";
 import { Store } from "../wa/store.js";
 

@@ -3,6 +3,8 @@
 //   npm run campana -- --max 5 --dry-run
 //   npm run campana -- --max 5
 
+import "./env.js";
+
 import { crearProveedor } from "../llm/index.js";
 import { ejecutarTanda } from "../sequence/campaign.js";
 import { createWaClient, type WaClient } from "../wa/client.js";
