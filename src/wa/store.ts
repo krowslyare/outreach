@@ -480,6 +480,21 @@ export class Store {
   }
 
   /**
+   * Si este número se sembró a mano para probar, y no salió del harvest.
+   *
+   * Es la condición que habilita saltarse el horario hábil: hacerlo hacia un
+   * prospecto real a las 3am delata al bot y quema el número, pero hacia un
+   * teléfono propio no protege de nada. La distinción vive en el store y no en
+   * un flag suelto para que la excusa no se pueda invocar sobre cualquiera.
+   */
+  esDestinatarioDePrueba(e164: string): boolean {
+    const fila = this.db
+      .prepare("select source_id from recipients where e164 = ?")
+      .get(e164) as { source_id: string } | undefined;
+    return fila !== undefined && fila.source_id.startsWith("prueba:");
+  }
+
+  /**
    * Borra un destinatario sembrado a mano y todo su historial.
    *
    * Solo toca filas con `source_id` de prueba. Ésa es la garantía que hace que

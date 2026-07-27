@@ -16,16 +16,33 @@ import { DEFAULT_SAFETY_CONFIG } from "../wa/types.js";
 interface Argumentos {
   max?: number;
   dryRun: boolean;
+  solo?: string;
 }
 
 function parseArgs(args: readonly string[]): Argumentos {
   let max: number | undefined;
   let dryRun = false;
+  let solo: string | undefined;
 
   for (let indice = 0; indice < args.length; indice += 1) {
     const argumento = args[indice]!;
     if (argumento === "--dry-run") {
       dryRun = true;
+      continue;
+    }
+
+    const soloInline = argumento.startsWith("--solo=")
+      ? argumento.slice("--solo=".length)
+      : undefined;
+    if (argumento === "--solo" || soloInline !== undefined) {
+      const raw = soloInline ?? args[indice + 1];
+      if (soloInline === undefined) indice += 1;
+      if (raw === undefined || !/^\+51\d{9}$/.test(raw)) {
+        throw new Error(
+          "--solo requiere un móvil peruano en E.164, por ejemplo --solo +51931845435",
+        );
+      }
+      solo = raw;
       continue;
     }
 
@@ -48,7 +65,7 @@ function parseArgs(args: readonly string[]): Argumentos {
     throw new Error(`argumento desconocido: ${argumento}`);
   }
 
-  return { max, dryRun };
+  return { max, dryRun, solo };
 }
 
 function delay(milliseconds: number): Promise<void> {
@@ -65,6 +82,36 @@ const store = new Store();
 // se exige explícitamente en vez de fallar recién cuando alguien esté caliente.
 const numeroHumano = process.env.NUMERO_HUMANO?.trim();
 let wa: WaClient | null = null;
+
+// El horario hábil se abre SOLO apuntando a un número sembrado a mano. Escribir
+// a un prospecto real a las 3am delata al bot y quema la cuenta; hacia un
+// teléfono propio no protege de nada, y esperar a mañana para probar el canal
+// tampoco protege de nada. La condición la resuelve el store —source_id de
+// prueba— y no un flag suelto, así que la excusa no se puede invocar sobre un
+// prospecto real ni por error de tipeo.
+const esPrueba =
+  argumentos.solo !== undefined && store.esDestinatarioDePrueba(argumentos.solo);
+const config = esPrueba
+  ? {
+      ...DEFAULT_SAFETY_CONFIG,
+      windowStartHour: 0,
+      windowEndHour: 24,
+      activeWeekdays: [1, 2, 3, 4, 5, 6, 7],
+      minGapSeconds: 5,
+      maxGapSeconds: 10,
+    }
+  : DEFAULT_SAFETY_CONFIG;
+if (esPrueba) {
+  console.info(
+    `MODO PRUEBA hacia ${argumentos.solo}: sin ventana horaria y con separación ` +
+      `mínima corta. El kill switch, la supresión y el takeover siguen aplicando.`,
+  );
+} else if (argumentos.solo !== undefined) {
+  console.info(
+    `--solo ${argumentos.solo}: NO es un número sembrado, así que corre con las ` +
+      `reglas completas (ventana horaria incluida).`,
+  );
+}
 
 try {
   let client: Pick<WaClient, "sendText">;
@@ -123,7 +170,7 @@ try {
           proveedor,
           enviar: (destino, texto) => waActivo.sendText(destino, texto),
           handoff: { numeroHumano },
-          config: DEFAULT_SAFETY_CONFIG,
+          config,
           now: () => new Date(),
           log: (mensaje) => console.log(`[inbound] ${mensaje}`),
         },
@@ -147,13 +194,13 @@ try {
       store,
       proveedor,
       client,
-      config: DEFAULT_SAFETY_CONFIG,
+      config,
       now: () => new Date(),
       sleep: delay,
       random: Math.random,
       log: (mensaje) => console.info(mensaje),
     },
-    { max: argumentos.max, dryRun: argumentos.dryRun },
+    { max: argumentos.max, dryRun: argumentos.dryRun, solo: argumentos.solo },
   );
 
   if (argumentos.dryRun) {

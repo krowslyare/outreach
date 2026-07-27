@@ -351,4 +351,46 @@ describe("paginación de candidatos", () => {
     expect(resumen.mensajesCompuestos).toHaveLength(1);
     expect(resumen.mensajesCompuestos[0]?.e164).toBe(alcanzable);
   });
+
+  it("--solo deja fuera al resto de la cola", async () => {
+    const { deps } = fakeDeps({
+      e164s: ["+51900000001", "+51931845435", "+51900000003"],
+      respuestas: [texto("Hola")],
+    });
+
+    const resumen = await ejecutarTanda(deps, {
+      max: 5,
+      dryRun: true,
+      solo: "+51931845435",
+    });
+
+    expect(resumen.mensajesCompuestos).toHaveLength(1);
+    expect(resumen.mensajesCompuestos[0]?.e164).toBe("+51931845435");
+  });
+
+  // El filtro se aplica a la página ya leída y el desplazamiento avanza por el
+  // tamaño crudo. Filtrar antes de contar rompía dos cosas: corría el offset de
+  // menos, y si el número buscado no caía en la primera página el `while`
+  // cortaba con cero resultados sin llegar nunca a la segunda.
+  it("--solo encuentra un número que cae en una página posterior", async () => {
+    const objetivo = "+51931845435";
+    const relleno = Array.from(
+      { length: 150 },
+      (_, indice) => `+5190000${String(indice).padStart(4, "0")}`,
+    );
+
+    const { deps } = fakeDeps({
+      e164s: [...relleno, objetivo],
+      respuestas: [texto("Hola")],
+    });
+
+    const resumen = await ejecutarTanda(deps, {
+      max: 1,
+      dryRun: true,
+      solo: objetivo,
+    });
+
+    expect(resumen.mensajesCompuestos).toHaveLength(1);
+    expect(resumen.mensajesCompuestos[0]?.e164).toBe(objetivo);
+  });
 });
