@@ -27,7 +27,7 @@ src/
     sunat.ts         Padrón reducido: RUC 20, estado ACTIVO, condición HABIDO, ubigeo
     adlibrary.ts     Meta Ad Library: ¿ya paga ads?
     dedupe.ts
-  score/       M2  Fit para S/649 — puro, sin IO, testeable
+  score/       M2  Fit para el servicio administrado — puro, sin IO, testeable
     score.ts
     score.test.ts
   sequence/    M3  A quién, cuándo, con qué
@@ -249,3 +249,38 @@ WhatsApp no te dice quién te bloqueó.
 
 Es lo que te dice si el pitch sirve antes de invertir en el agente, y te da el
 baseline sin el cual el kill switch no tiene contra qué comparar.
+
+## La oferta, verificada contra el código de Kurogrid — 2026-07-27
+
+Corrección de un supuesto que arrastramos desde el planteo inicial: **S/649 no es
+la oferta, es el plan más caro de tres.** El de entrada es S/199.
+
+| Plan | Mensualidad | Para quién |
+|---|---|---|
+| Presencia | S/199 | No tiene web y necesita existir en Google con algo serio |
+| Empresa | S/449 | Quiere que la web capte pacientes, no solo estar presente |
+| Empresa + | S/649 | Varios servicios o sedes, cambios seguido, Libro de Reclamaciones |
+
+Consecuencia directa: calificar por "puede pagar S/649 sin rechistar" encogía el
+mercado sin razón. Un consultorio chico entra por S/199.
+
+**No hay costo de desarrollo inicial.** Verificado en tres fuentes independientes
+del código de Kurogrid: `waas-plans.ts` (`setup: "S/ 0 costo de creación
+inicial"`), la migración de pricing del portal, y el documento de operaciones del
+plan Empresa+. La landing lo llama "Desarrollo inicial cero".
+
+Eso habilita el gancho más concreto del primer contacto, y por eso se agregó la
+apertura `modelo`. Dos reglas al usarlo, que están en el prompt: en minúsculas y
+con palabras —nunca "S/ 0" ni mayúsculas, que leen como aviso de préstamo— y
+siempre pegado a la mensualidad, nunca como "gratis" a secas, que atrae a quien
+no va a pagar.
+
+**Qué vende Kurogrid, en sus propias palabras:** "servicio digital administrado",
+"nos encargamos de la web y las herramientas digitales que tu empresa necesita,
+con un solo proveedor y una mensualidad clara". No es una web como entregable ni
+es marketing de captación: es que el cliente no se tenga que ocupar.
+
+El compositor no sabía nada de esto —importaba el catálogo y no lo usaba— y el
+prompt le pedía explícitamente que NO explicara el servicio. De ahí salían
+mensajes que no decían nada, del tipo "busco a la persona que ve cómo los
+encuentran los pacientes".
