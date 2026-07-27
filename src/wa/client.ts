@@ -65,8 +65,34 @@ export class WhatsAppWebClient implements WaClient {
   async sendText(e164: string, body: string): Promise<string> {
     const digits = e164.replace(/\D/g, "");
     if (digits.length === 0) throw new Error(`E.164 inválido: ${e164}`);
-    const message = await this.client.sendMessage(`${digits}@c.us`, body);
-    return message.id._serialized;
+
+    // Se le pregunta a WhatsApp cuál es el chat en vez de armar `${digits}@c.us`
+    // a mano. Dos razones: un número sin WhatsApp da null acá y se corta con un
+    // mensaje que se entiende, en vez de un TypeError diez líneas más abajo; y
+    // la serialización real la decide WhatsApp, que en varios países no es la
+    // concatenación obvia del número.
+    const contacto = await this.client.getNumberId(digits);
+    if (contacto === null) {
+      throw new Error(
+        `${e164} no está registrado en WhatsApp; no se envía nada. ` +
+          `Verifica que ese número tenga WhatsApp activo.`,
+      );
+    }
+
+    const message = await this.client.sendMessage(contacto._serialized, body);
+    // whatsapp-web.js promete un Message, pero cuando su capa interna no
+    // coincide con la versión de WhatsApp Web devuelve undefined. Sin esta
+    // guarda el fallo aparece como "Cannot read properties of undefined
+    // (reading 'id')", que no dice qué pasó ni dónde mirar.
+    const waMessageId = message?.id?._serialized;
+    if (typeof waMessageId !== "string") {
+      throw new Error(
+        `WhatsApp aceptó el envío a ${e164} pero no devolvió un mensaje. ` +
+          `Suele ser incompatibilidad entre whatsapp-web.js y la versión de ` +
+          `WhatsApp Web. El mensaje PUEDE haber salido: revisa el chat antes de reintentar.`,
+      );
+    }
+    return waMessageId;
   }
 
   onInbound(callback: InboundHandler): void {
