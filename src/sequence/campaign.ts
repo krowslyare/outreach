@@ -90,6 +90,7 @@ const INTENCIONES_APERTURA: readonly IntencionApertura[] = [
   "operativa",
   "permiso",
   "directa",
+  "modelo",
 ];
 
 function intencionParaIndice(indice: number): IntencionApertura {

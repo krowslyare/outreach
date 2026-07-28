@@ -34,6 +34,22 @@ if (e164 === undefined || !/^\+51\d{9}$/.test(e164)) {
     "--e164 requiere un móvil peruano en E.164, por ejemplo +51987654321",
   );
 }
+if (args.includes("--reintentar")) {
+  const store = new Store();
+  try {
+    const liberados = store.liberarEnviosNoConfirmados(e164);
+    console.info(
+      liberados > 0
+        ? `Liberados ${liberados} paso(s) reclamados sin envío confirmado para ${e164}.\n` +
+            `Revisa el chat antes de reintentar: "sin confirmar" no es lo mismo que "no salió".`
+        : `Nada que liberar para ${e164} (o no es un número de prueba).`,
+    );
+  } finally {
+    store.close();
+  }
+  process.exit(0);
+}
+
 if (quitar) {
   const store = new Store();
   try {
