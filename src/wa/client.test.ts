@@ -7,6 +7,7 @@ import {
   cuerpoInbound,
   e164DesdeJid,
   esperaReconexion,
+  eventoDesdeMensaje,
   textoDeMensaje,
   tipoDeMensaje,
 } from "./client.js";
@@ -193,5 +194,100 @@ describe("textoDeMensaje", () => {
   it("sin texto devuelve cadena vacía y no undefined", () => {
     expect(textoDeMensaje({ audioMessage: {} })).toBe("");
     expect(textoDeMensaje(null)).toBe("");
+  });
+});
+
+describe("eventoDesdeMensaje", () => {
+  function mensaje(contenido: unknown, overrides: Record<string, unknown> = {}) {
+    return {
+      key: {
+        remoteJid: "51931845435@s.whatsapp.net",
+        id: "wa-1",
+        fromMe: false,
+        ...(overrides.key as object),
+      },
+      messageTimestamp: 1785200000,
+      message: contenido,
+      ...overrides,
+    } as Parameters<typeof eventoDesdeMensaje>[0];
+  }
+
+  // LA regresión: Baileys entrega el sobre SIN normalizar. Con mensajes
+  // temporales activados el texto real viaja dentro, y leyendo el sobre una
+  // respuesta se clasificaba como media con cuerpo vacío — con lo cual un
+  // "STOP" no se detectaba y le seguíamos escribiendo a quien pidió que no.
+  //
+  // Se prueba a través de eventoDesdeMensaje y NO llamando a
+  // normalizeMessageContent en el test: así verifica que el adaptador la use,
+  // que es lo que puede romperse.
+  it("desenvuelve un texto efímero en vez de leerlo como media vacía", () => {
+    const evento = eventoDesdeMensaje(
+      mensaje({
+        ephemeralMessage: { message: { conversation: "STOP, no me escriban" } },
+      }),
+    );
+
+    expect(evento?.tipo).toBe("chat");
+    expect(evento?.tieneMedia).toBe(false);
+    expect(evento?.body).toBe("STOP, no me escriban");
+  });
+
+  it("desenvuelve un ver-una-vez y conserva que es media", () => {
+    const evento = eventoDesdeMensaje(
+      mensaje({
+        viewOnceMessageV2: { message: { imageMessage: { caption: "mire" } } },
+      }),
+    );
+
+    expect(evento?.tipo).toBe("image");
+    expect(evento?.tieneMedia).toBe(true);
+    expect(evento?.body).toBe("mire");
+  });
+
+  it("un texto normal sigue funcionando igual", () => {
+    const evento = eventoDesdeMensaje(mensaje({ conversation: "hola" }));
+
+    expect(evento).toMatchObject({
+      e164: "+51931845435",
+      body: "hola",
+      tipo: "chat",
+      tieneMedia: false,
+      citaOtroMensaje: false,
+      waMessageId: "wa-1",
+    });
+  });
+
+  it("detecta una cita aunque venga dentro de un sobre efímero", () => {
+    const evento = eventoDesdeMensaje(
+      mensaje({
+        ephemeralMessage: {
+          message: {
+            extendedTextMessage: {
+              text: "sobre esto",
+              contextInfo: { quotedMessage: { conversation: "el anterior" } },
+            },
+          },
+        },
+      }),
+    );
+
+    expect(evento?.citaOtroMensaje).toBe(true);
+  });
+
+  // Un grupo no se contesta solo, y sin id no hay con qué correlacionar ACKs.
+  it("descarta lo que no se puede atender", () => {
+    expect(
+      eventoDesdeMensaje(
+        mensaje({ conversation: "hola" }, { key: { remoteJid: "1203@g.us", id: "x" } }),
+      ),
+    ).toBeNull();
+    expect(
+      eventoDesdeMensaje(
+        mensaje(
+          { conversation: "hola" },
+          { key: { remoteJid: "51931845435@s.whatsapp.net", id: null } },
+        ),
+      ),
+    ).toBeNull();
   });
 });

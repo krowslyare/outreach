@@ -2,6 +2,7 @@ import { Boom } from "@hapi/boom";
 import {
   DisconnectReason,
   makeWASocket,
+  normalizeMessageContent,
   proto,
   useMultiFileAuthState,
   type WAMessage,
@@ -265,6 +266,55 @@ export function textoDeMensaje(mensaje: WAMessage["message"]): string {
 }
 
 /**
+ * Convierte un mensaje de Baileys en el evento que consume el resto del sistema.
+ *
+ * Exportada y pura para poder testear el cableado, no solo las piezas. Cuando
+ * esto vivía dentro de la clase, un test podía verificar que
+ * `normalizeMessageContent` hace lo suyo mientras el adaptador seguía sin
+ * llamarla — verde y roto a la vez.
+ *
+ * Devuelve null para lo que no se contesta: grupos, difusiones, y cualquier
+ * cosa sin teléfono o sin id con el que correlacionar.
+ */
+export function eventoDesdeMensaje(mensaje: WAMessage): InboundEvent | null {
+  // remoteJid puede venir como @lid; remoteJidAlt trae entonces el jid con el
+  // número real. Se prueban los dos y, si ninguno da un teléfono, se descarta:
+  // sin número no hay a quién asociarlo en la base. También deja fuera grupos
+  // (@g.us) y difusiones, que no se contestan solos.
+  const e164 =
+    e164DesdeJid(mensaje.key.remoteJid) ??
+    e164DesdeJid(mensaje.key.remoteJidAlt);
+  if (e164 === null) return null;
+  if (typeof mensaje.key.id !== "string") return null;
+
+  // Baileys entrega el SOBRE sin normalizar. Con mensajes temporales activados
+  // —común en negocios— el texto real viaja dentro de `ephemeralMessage`, y
+  // leer el sobre daba tipo "ephemeral", tieneMedia true y cuerpo VACÍO. O sea:
+  // una respuesta de verdad se clasificaba como media, y un "STOP" no se
+  // detectaba, así que le seguíamos escribiendo a alguien que pidió que no.
+  //
+  // Se usa la función de Baileys y no una lista propia de envoltorios: es la
+  // misma que usa la librería internamente (ver Utils/process-message.js) y se
+  // mantiene al día con los formatos nuevos sin que nosotros la toquemos.
+  const contenido = normalizeMessageContent(mensaje.message);
+  const tipo = tipoDeMensaje(contenido);
+  const segundos = Number(mensaje.messageTimestamp ?? 0);
+  const citado = contenido?.extendedTextMessage?.contextInfo?.quotedMessage;
+
+  return {
+    e164,
+    body: cuerpoInbound(contenido, tipo),
+    // El timestamp del mensaje conserva cuándo escribió el prospecto aunque el
+    // proceso haya estado ocupado antes de despachar el callback.
+    at: segundos > 0 ? new Date(segundos * 1_000) : new Date(),
+    waMessageId: mensaje.key.id,
+    tipo,
+    tieneMedia: tipo !== "chat" && tipo !== "desconocido",
+    citaOtroMensaje: citado !== undefined && citado !== null,
+  };
+}
+
+/**
  * Adaptador sobre Baileys.
  *
  * El resto del sistema depende de WaClient, no de la librería. Esa frontera es
@@ -462,6 +512,16 @@ export class BaileysClient implements WaClient {
           return;
         }
 
+        // El `instanceof` es correcto aunque haya DOS copias de @hapi/boom en
+        // el árbol (10.0.1 en la raíz, 9.1.4 anidada en Baileys) y el error lo
+        // construya la de Baileys. La clase define `static [Symbol.hasInstance]`
+        // y ahí hace duck-typing con `isBoom`, no comparación de prototipos —
+        // exactamente para este caso. Verificado con el import de producción.
+        //
+        // Importa dejarlo escrito: si esto fallara, `codigo` sería siempre
+        // undefined, todo cierre se leería como transitorio, y un baneo real
+        // (403) o un loggedOut nunca dispararían el kill switch. El bot
+        // reconectaría en bucle contra una cuenta muerta.
         const codigo =
           update.lastDisconnect?.error instanceof Boom
             ? update.lastDisconnect.error.output.statusCode
@@ -565,32 +625,8 @@ export class BaileysClient implements WaClient {
       void this.evaluarEnvioPropio(mensaje);
       return;
     }
-    // remoteJid puede venir como @lid; remoteJidAlt trae entonces el jid con el
-    // número real. Se prueban los dos y, si ninguno da un teléfono, se descarta:
-    // sin número no hay a quién asociarlo en la base. También deja fuera grupos
-    // (@g.us) y difusiones, que no se contestan solos.
-    const e164 =
-      e164DesdeJid(mensaje.key.remoteJid) ??
-      e164DesdeJid(mensaje.key.remoteJidAlt);
-    if (e164 === null) return;
-    if (typeof mensaje.key.id !== "string") return;
-
-    const contenido = mensaje.message;
-    const tipo = tipoDeMensaje(contenido);
-    const segundos = Number(mensaje.messageTimestamp ?? 0);
-    const evento: InboundEvent = {
-      e164,
-      body: cuerpoInbound(contenido, tipo),
-      // El timestamp del mensaje conserva cuándo escribió el prospecto aunque
-      // el proceso haya estado ocupado antes de despachar el callback.
-      at: segundos > 0 ? new Date(segundos * 1_000) : new Date(),
-      waMessageId: mensaje.key.id,
-      tipo,
-      tieneMedia: tipo !== "chat" && tipo !== "desconocido",
-      citaOtroMensaje:
-        contenido?.extendedTextMessage?.contextInfo?.quotedMessage !== undefined &&
-        contenido?.extendedTextMessage?.contextInfo?.quotedMessage !== null,
-    };
+    const evento = eventoDesdeMensaje(mensaje);
+    if (evento === null) return;
     for (const handler of this.inboundHandlers) handler(evento);
   }
 
