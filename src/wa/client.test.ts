@@ -1,9 +1,11 @@
-import { proto } from "baileys";
+import { DisconnectReason, proto } from "baileys";
 import { describe, expect, it } from "vitest";
 
 import {
   ACK_DESDE_BAILEYS,
+  clasificarCierre,
   e164DesdeJid,
+  esperaReconexion,
   textoDeMensaje,
   tipoDeMensaje,
 } from "./client.js";
@@ -45,6 +47,63 @@ describe("traducción de ACK de Baileys", () => {
     for (const estado of [Status.READ, Status.PLAYED]) {
       expect(ACK_DESDE_BAILEYS[estado]! >= UMBRAL_DISPOSITIVO).toBe(true);
     }
+  });
+});
+
+describe("clasificarCierre", () => {
+  // La regresión concreta: en la primera prueba larga se cayó la red, llegó un
+  // 408, y el kill switch persistente apagó la campaña. Recuperarse exigía
+  // editar la base a mano.
+  it("un timeout de red NO es un problema de cuenta", () => {
+    for (const codigo of [
+      DisconnectReason.timedOut,
+      DisconnectReason.connectionLost,
+      DisconnectReason.connectionClosed,
+      DisconnectReason.unavailableService,
+    ]) {
+      expect(clasificarCierre(codigo).clase).toBe("transitorio");
+    }
+  });
+
+  // Un código nuevo o desconocido no debe apagar la campaña: reconectar no
+  // envía nada, y cada envío sigue pasando por el motor de seguridad.
+  it("lo desconocido se reintenta, no se da por fatal", () => {
+    expect(clasificarCierre(undefined).clase).toBe("transitorio");
+    expect(clasificarCierre(499).clase).toBe("transitorio");
+  });
+
+  it("solo lo que necesita un humano dispara el kill switch", () => {
+    for (const codigo of [
+      DisconnectReason.loggedOut,
+      DisconnectReason.forbidden,
+      DisconnectReason.badSession,
+      DisconnectReason.multideviceMismatch,
+    ]) {
+      expect(clasificarCierre(codigo).clase).toBe("cuenta");
+    }
+  });
+
+  // La cuenta está sana: es la sesión la que se movió a otro lado. Marcarla como
+  // problema de cuenta obligaría a limpiar el kill switch por abrir WhatsApp Web.
+  it("otra sesión tomando el número no es un problema de cuenta", () => {
+    expect(clasificarCierre(DisconnectReason.connectionReplaced).clase).toBe(
+      "reemplazada",
+    );
+  });
+
+  it("el reinicio tras vincular sigue siendo su propio caso", () => {
+    expect(clasificarCierre(DisconnectReason.restartRequired).clase).toBe(
+      "reinicio",
+    );
+  });
+});
+
+describe("esperaReconexion", () => {
+  it("crece y se topa, para no dormir horas ni martillar a WhatsApp", () => {
+    expect(esperaReconexion(1)).toBe(2_000);
+    expect(esperaReconexion(2)).toBe(4_000);
+    expect(esperaReconexion(8)).toBe(60_000);
+    expect(esperaReconexion(50)).toBe(60_000);
   });
 });
 

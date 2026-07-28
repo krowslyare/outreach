@@ -4,6 +4,7 @@ import type { AgentDecision } from "../agent/agent.js";
 import {
   ejecutarHandoff,
   mensajeParaHumano,
+  mensajeParaProspecto,
   type HandoffDeps,
   type PortalClient,
   type StoreHandoff,
@@ -44,11 +45,15 @@ function crearDobles(opciones: OpcionesDobles = {}): {
     suppress(e164, reason) {
       eventos.push(`store.suppress:${e164}:${reason}`);
     },
+    recordOutboundLibre(e164) {
+      eventos.push(`store.recordOutboundLibre:${e164}`);
+    },
   };
 
   const deps: HandoffDeps = {
     store,
     numeroHumano: NUMERO_HUMANO,
+    now: () => new Date("2026-07-28T04:00:00.000Z"),
     async enviar(e164, texto) {
       eventos.push(`enviar:${e164}:${texto}`);
       if (opciones.enviarRechaza === true) {
@@ -127,12 +132,17 @@ describe("ejecutarHandoff", () => {
       portalOk: false,
     });
 
-    // Un solo array prueba el orden global: spies separados no demostrarían
-    // que el lock ya estaba puesto cuando empezó el envío.
-    expect(eventos.map((evento) => evento.split(":")[0])).toEqual([
-      "store.load",
-      "store.setHumanTakeover",
-      "enviar",
+    // Un solo array prueba el orden global: el lock, después el aviso al
+    // humano —que es el camino de recuperación si algo falla— y recién al
+    // final el acuse al prospecto.
+    expect(eventos).toEqual([
+      `store.load:${E164}`,
+      `store.setHumanTakeover:${E164}`,
+      `enviar:${NUMERO_HUMANO}:${mensajeParaHumano(NOMBRE, E164, DECISION_ESCALAR)}`,
+      `enviar:${E164}:${mensajeParaProspecto(DECISION_ESCALAR)}`,
+      // Lo último que le dijimos tiene que quedar en el hilo guardado, o el
+      // historial termina en su "me interesa" como si no le hubiéramos contestado.
+      `store.recordOutboundLibre:${E164}`,
     ]);
   });
 
@@ -149,6 +159,7 @@ describe("ejecutarHandoff", () => {
     expect(eventos.map((evento) => evento.split(":")[0])).toEqual([
       "store.load",
       "store.setHumanTakeover",
+      "enviar",
       "enviar",
     ]);
   });
@@ -228,11 +239,74 @@ describe("ejecutarHandoff", () => {
 
     await ejecutarHandoff(deps, E164, NOMBRE, DECISION_ESCALAR);
 
-    expect(log).toHaveBeenCalledTimes(2);
+    expect(log).toHaveBeenCalledTimes(3);
     expect(log).toHaveBeenCalledWith(
       expect.stringContaining("notificación de handoff"),
     );
+    expect(log).toHaveBeenCalledWith(expect.stringContaining("acuse al prospecto"));
     expect(log).toHaveBeenCalledWith(expect.stringContaining("portal"));
+  });
+
+  // El prospecto acaba de decir que le interesa. Que el bot se quede mudo por
+  // el lock era el silencio más caro del flujo.
+  it("le responde al prospecto, no solo al humano", async () => {
+    const { deps, eventos } = crearDobles();
+
+    await ejecutarHandoff(deps, E164, NOMBRE, DECISION_ESCALAR);
+
+    const alProspecto = eventos.find((evento) =>
+      evento.startsWith(`enviar:${E164}:`),
+    );
+    expect(alProspecto).toBeDefined();
+    expect(alProspecto).toContain("llamada");
+    expect(alProspecto).toContain("reunión");
+  });
+
+  // Si el acuse revienta, el lock y el aviso ya ocurrieron: se pierde el acuse,
+  // no el control ni la alerta.
+  it("un acuse fallido no cambia el resultado del handoff", async () => {
+    const { deps } = crearDobles({ enviarRechaza: true });
+
+    await expect(
+      ejecutarHandoff(deps, E164, NOMBRE, DECISION_ESCALAR),
+    ).resolves.toEqual({
+      estado: "ejecutado",
+      notificado: false,
+      portalOk: false,
+    });
+  });
+});
+
+describe("mensajeParaProspecto", () => {
+  it("ofrece las tres opciones y una sola pregunta", () => {
+    const mensaje = mensajeParaProspecto(DECISION_ESCALAR);
+
+    expect(mensaje).toContain("llamada");
+    expect(mensaje).toContain("reunión");
+    expect(mensaje).toContain("por acá");
+    expect(mensaje.split("?").length - 1).toBe(1);
+  });
+
+  // Ofrecerle a alguien molesto que elija entre llamada y reunión suena a que
+  // nadie leyó su queja.
+  it("a una queja no le ofrece un menú de opciones", () => {
+    const mensaje = mensajeParaProspecto({
+      kind: "escalar",
+      motivo: "queja",
+      resumen: "Está molesto porque le escribimos.",
+    });
+
+    expect(mensaje).not.toContain("llamada");
+    expect(mensaje).not.toContain("reunión");
+  });
+
+  // Un nombre propio que la persona nunca oyó no genera confianza.
+  it("nunca dice el nombre del dueño", () => {
+    for (const motivo of ["quiere_contratar", "queja", "pide_humano"]) {
+      expect(
+        mensajeParaProspecto({ kind: "escalar", motivo, resumen: "" }),
+      ).not.toMatch(/hideki/i);
+    }
   });
 });
 

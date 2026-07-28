@@ -335,7 +335,7 @@ describe("manejarInbound", () => {
     expect(enviar).toHaveBeenCalledTimes(1);
   });
 
-  it("escala, activa takeover y avisa al número de Hideki", async () => {
+  it("escala, activa takeover, avisa al humano y le responde al prospecto", async () => {
     const { deps, store, enviar } = crearDobles({
       respuesta: {
         corte: "fin",
@@ -358,12 +358,18 @@ describe("manejarInbound", () => {
     });
 
     expect(store.setHumanTakeover).toHaveBeenCalledWith(E164);
-    expect(enviar).toHaveBeenCalledTimes(1);
+    expect(enviar).toHaveBeenCalledTimes(2);
     expect(enviar).toHaveBeenCalledWith(
       NUMERO_HUMANO,
       expect.stringContaining("Quiere coordinar una llamada esta semana."),
     );
-    expect(enviar).not.toHaveBeenCalledWith(E164, expect.any(String));
+    // Antes esta línea afirmaba lo contrario —que al prospecto NO se le
+    // escribía— y por eso el "me interesa" quedaba sin respuesta hasta que un
+    // humano abriera WhatsApp.
+    expect(enviar).toHaveBeenCalledWith(
+      E164,
+      expect.stringContaining("¿Cómo prefiere"),
+    );
   });
 
   it("marca perdido y suprime al prospecto sin enviar", async () => {

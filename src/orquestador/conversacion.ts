@@ -41,7 +41,7 @@ export interface ConversacionDeps {
   >;
   proveedor: ProveedorLLM;
   enviar(e164: string, texto: string): Promise<string>;
-  handoff: Omit<HandoffDeps, "store" | "enviar">;
+  handoff: Omit<HandoffDeps, "store" | "enviar" | "now">;
   config: SafetyConfig;
   now(): Date;
   log?: (mensaje: string) => void;
@@ -156,7 +156,7 @@ async function resolver(
   // 5. Escalar y perder van al handoff, que pone el lock antes de nada.
   if (decision.kind !== "responder") {
     const resultado = await ejecutarHandoff(
-      { ...deps.handoff, store: deps.store, enviar: deps.enviar },
+      { ...deps.handoff, store: deps.store, enviar: deps.enviar, now: deps.now },
       e164,
       ficha.nombre,
       decision,

@@ -76,6 +76,90 @@ export const ACK_DESDE_BAILEYS: Record<number, number> = {
   [proto.WebMessageInfo.Status.PLAYED]: 4,
 };
 
+/**
+ * Qué hacer cuando WhatsApp cierra la conexión.
+ *
+ * Antes existían dos casos —`restartRequired` y `loggedOut`— y TODO lo demás
+ * caía en "fatal", que dispara el kill switch persistente. Un timeout de red
+ * (408) apagaba la campaña hasta que alguien editara la base a mano. Pasó de
+ * verdad en la primera prueba larga.
+ *
+ * La asimetría manda: el kill switch existe para dejar de ENVIAR cuando WhatsApp
+ * está castigando la cuenta. Reconectar no envía nada —cada envío sigue pasando
+ * por el motor de seguridad— así que reconectar de más no cuesta. No reconectar
+ * cuesta el listener entero: respuestas perdidas y ACKs perdidos, o sea el kill
+ * switch ciego. Por eso lo desconocido se trata como transitorio, con tope.
+ */
+export type ClaseCierre =
+  /** Ruido de red. Se reconecta con espera creciente. */
+  | "transitorio"
+  /** Normal justo después de vincular. Se reconecta de inmediato. */
+  | "reinicio"
+  /** La cuenta necesita un humano. Dispara el kill switch. */
+  | "cuenta"
+  /** Otra sesión tomó el número. Se para, pero la cuenta está sana. */
+  | "reemplazada";
+
+export function clasificarCierre(codigo: number | undefined): {
+  clase: ClaseCierre;
+  razon: string;
+} {
+  switch (codigo) {
+    case DisconnectReason.restartRequired:
+      return { clase: "reinicio", razon: "WhatsApp pidió reiniciar la sesión" };
+    case DisconnectReason.loggedOut:
+      return {
+        clase: "cuenta",
+        razon:
+          "loggedOut: la sesión se cerró desde el teléfono. Borra " +
+          `${DIRECTORIO_SESION} y escanea el QR de nuevo.`,
+      };
+    case DisconnectReason.forbidden:
+      return {
+        clase: "cuenta",
+        razon:
+          "forbidden (403): WhatsApp rechazó la cuenta. Suele ser un baneo; " +
+          "no sigas enviando desde este número.",
+      };
+    case DisconnectReason.badSession:
+      return {
+        clase: "cuenta",
+        razon: `badSession (500): la sesión quedó corrupta. Borra ${DIRECTORIO_SESION} y vuelve a escanear.`,
+      };
+    case DisconnectReason.multideviceMismatch:
+      return {
+        clase: "cuenta",
+        razon:
+          "multideviceMismatch (411): hay que vincular el dispositivo de nuevo.",
+      };
+    case DisconnectReason.connectionReplaced:
+      return {
+        clase: "reemplazada",
+        razon:
+          "connectionReplaced (440): otra sesión tomó este número. Reconectar " +
+          "acá solo se lo quitaría a la otra, así que este proceso se detiene.",
+      };
+    default:
+      return {
+        clase: "transitorio",
+        razon: `conexión cerrada (${codigo ?? "sin código"})`,
+      };
+  }
+}
+
+/** Cuántas reconexiones seguidas antes de rendirse, y cuánto se espera. */
+const MAX_RECONEXIONES = 8;
+export function esperaReconexion(intento: number): number {
+  // 2s, 4s, 8s... hasta 60s. Sin tope, un corte largo dejaría el proceso
+  // durmiendo horas; sin espera creciente, martillaría a WhatsApp, que es
+  // justamente la conducta que hace que te bloqueen.
+  return Math.min(2_000 * 2 ** (intento - 1), 60_000);
+}
+
+function pausa(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
 /** Baileys exige un logger con forma de pino. Callado: su traza es enorme. */
 const LOGGER_SILENCIOSO: ILogger = {
   level: "silent",
@@ -137,6 +221,9 @@ export class BaileysClient implements WaClient {
   private readonly ackHandlers = new Set<AckHandler>();
   private readonly fatalHandlers = new Set<FatalHandler>();
   private detenido = false;
+  /** Reconexiones seguidas sin haber llegado a abrir. Se reinicia al abrir. */
+  private intentos = 0;
+  private reconectando = false;
 
   async sendText(e164: string, body: string): Promise<string> {
     const socket = this.socket;
@@ -195,21 +282,64 @@ export class BaileysClient implements WaClient {
    * está mirando la pantalla y el proceso no tiene nada que hacer mientras.
    */
   async start(): Promise<void> {
-    for (let intento = 1; intento <= 5; intento += 1) {
-      const reinicio = await this.conectar();
-      if (!reinicio) return;
+    for (this.intentos = 1; this.intentos <= MAX_RECONEXIONES; this.intentos += 1) {
+      const resultado = await this.conectar();
+      if (resultado.estado === "lista") return;
       console.info(
-        `WhatsApp pidió reiniciar la sesión (normal tras vincular); reconectando (${intento}/5)...`,
+        `${resultado.razon}; reconectando (${this.intentos}/${MAX_RECONEXIONES})...`,
       );
+      // El reinicio tras vincular es inmediato; un corte de red no.
+      if (resultado.estado === "transitorio") {
+        await pausa(esperaReconexion(this.intentos));
+      }
     }
     throw new Error(
-      "WhatsApp pidió reiniciar la sesión 5 veces seguidas; se aborta para no " +
-        "quedar en un bucle de reconexión.",
+      `No se pudo abrir la sesión de WhatsApp en ${MAX_RECONEXIONES} intentos.`,
     );
   }
 
-  /** Resuelve `true` si hay que volver a conectar, `false` si quedó lista. */
-  private async conectar(): Promise<boolean> {
+  /**
+   * Reconecta después de que la sesión YA estaba abierta.
+   *
+   * Sin esto, un cierre posterior al `start()` no tenía a dónde ir: la promesa de
+   * `conectar()` ya estaba resuelta, así que su `reject` era un no-op. El proceso
+   * seguía vivo en el bucle de escucha con el socket muerto — parecía escuchando
+   * y no oía nada, que es la peor de las dos fallas posibles.
+   */
+  private async reconectar(): Promise<void> {
+    if (this.reconectando || this.detenido) return;
+    this.reconectando = true;
+    try {
+      while (!this.detenido && this.intentos <= MAX_RECONEXIONES) {
+        await pausa(esperaReconexion(this.intentos));
+        if (this.detenido) return;
+        console.info(
+          `Reconectando a WhatsApp (${this.intentos}/${MAX_RECONEXIONES})...`,
+        );
+        try {
+          const resultado = await this.conectar();
+          if (resultado.estado === "lista") return;
+          this.intentos += 1;
+        } catch {
+          // conectar() rechaza en los cierres de cuenta, que ya emitieron fatal.
+          return;
+        }
+      }
+      if (!this.detenido) {
+        console.error(
+          `Se agotaron los ${MAX_RECONEXIONES} intentos de reconexión. El proceso ` +
+            `ya NO está escuchando: ni respuestas ni ACKs. Reinícialo.`,
+        );
+      }
+    } finally {
+      this.reconectando = false;
+    }
+  }
+
+  private async conectar(): Promise<{
+    estado: "lista" | "reinicio" | "transitorio";
+    razon: string;
+  }> {
     const { state, saveCreds } = await useMultiFileAuthState(DIRECTORIO_SESION);
     const socket = makeWASocket({
       auth: state,
@@ -226,43 +356,61 @@ export class BaileysClient implements WaClient {
     });
     this.wireEvents(socket);
 
-    return new Promise<boolean>((resolve, reject) => {
+    return new Promise((resolve, reject) => {
+      // Un cierre DESPUÉS de abrir llega a este mismo listener, cuando la promesa
+      // ya está resuelta. Ahí no se resuelve nada: se reconecta.
+      let abierta = false;
+
       socket.ev.on("connection.update", (update) => {
         if (typeof update.qr === "string") this.mostrarQr(update.qr);
 
         if (update.connection === "open") {
           const numero = e164DesdeJid(socket.user?.id) ?? socket.user?.id ?? "?";
           console.info(`WhatsApp listo. Sesión de ${numero}: ya se puede enviar.`);
-          resolve(false);
+          abierta = true;
+          this.intentos = 1;
+          resolve({ estado: "lista", razon: "" });
           return;
         }
 
         if (update.connection !== "close") return;
+        if (this.detenido) {
+          if (!abierta) resolve({ estado: "lista", razon: "" });
+          return;
+        }
 
         const codigo =
           update.lastDisconnect?.error instanceof Boom
             ? update.lastDisconnect.error.output.statusCode
             : undefined;
+        const { clase, razon } = clasificarCierre(codigo);
 
-        if (this.detenido) {
-          resolve(false);
-          return;
-        }
-        if (codigo === DisconnectReason.restartRequired) {
-          resolve(true);
-          return;
-        }
-        if (codigo === DisconnectReason.loggedOut) {
-          const razon =
-            "loggedOut: la sesión se cerró desde el teléfono. Borra " +
-            `${DIRECTORIO_SESION} y escanea el QR de nuevo.`;
+        if (clase === "cuenta") {
+          // Lo único que apaga la campaña. El kill switch es persistente y
+          // borrarlo es a mano, así que acá solo entra lo que de verdad
+          // necesita a un humano mirando el teléfono.
           this.emitFatal(razon);
-          reject(new Error(razon));
+          if (abierta) console.error(`WhatsApp: ${razon}`);
+          else reject(new Error(razon));
           return;
         }
-        const razon = `conexión cerrada (${codigo ?? "sin código"})`;
-        this.emitFatal(razon);
-        reject(new Error(razon));
+
+        if (clase === "reemplazada") {
+          // No se toca el kill switch: la cuenta está sana, es la sesión la que
+          // se movió. Reconectar sería pelearse con la otra sesión a ping-pong.
+          this.detenido = true;
+          if (abierta) console.error(`WhatsApp: ${razon}`);
+          else reject(new Error(razon));
+          return;
+        }
+
+        if (!abierta) {
+          resolve({ estado: clase === "reinicio" ? "reinicio" : "transitorio", razon });
+          return;
+        }
+
+        console.warn(`WhatsApp se desconectó: ${razon}`);
+        void this.reconectar();
       });
     });
   }
