@@ -419,3 +419,78 @@ describe("Store", () => {
     });
   });
 });
+
+describe("pendientes y autoría de mensajes", () => {
+  const stores: Store[] = [];
+  afterEach(() => {
+    for (const store of stores.splice(0)) store.close();
+  });
+
+  function conProspecto(ahora: Date): Store {
+    const store = new Store(":memory:", () => ahora);
+    stores.push(store);
+    store.importRecipients([scored("A", "+51999111222")]);
+    return store;
+  }
+
+  const AHORA = new Date("2026-07-28T15:00:00.000Z");
+
+  it("devuelve el entrante sin atender y lo saca al marcarlo", () => {
+    const store = conProspecto(AHORA);
+    store.recordInbound("+51999111222", "¿cuánto cuesta?", AHORA, {
+      waMessageId: "wa-1",
+      clase: "humano",
+    });
+
+    expect(store.inboundsPendientes(10)).toEqual([
+      { e164: "+51999111222", waMessageId: "wa-1", at: AHORA },
+    ]);
+
+    store.marcarInboundAtendido("wa-1", AHORA);
+    expect(store.inboundsPendientes(10)).toEqual([]);
+  });
+
+  // Un autorespondedor se registra sin atender y no hay nada que contestarle:
+  // devolverlo acá haría que el barrido le hable a un robot todas las veces.
+  it("no devuelve entrantes automáticos", () => {
+    const store = conProspecto(AHORA);
+    store.recordInbound("+51999111222", "Gracias por comunicarse", AHORA, {
+      waMessageId: "wa-auto",
+      clase: "automatico",
+    });
+
+    expect(store.inboundsPendientes(10)).toEqual([]);
+  });
+
+  it("no devuelve a quien ya está suprimido o tomado por un humano", () => {
+    const store = conProspecto(AHORA);
+    store.recordInbound("+51999111222", "hola", AHORA, {
+      waMessageId: "wa-2",
+      clase: "humano",
+    });
+    store.setHumanTakeover("+51999111222");
+
+    expect(store.inboundsPendientes(10)).toEqual([]);
+  });
+
+  // Sin esto, reiniciar el proceso haría que sus propios envíos recientes
+  // parecieran escritos a mano desde el celular, y el takeover mataría la
+  // conversación con ese prospecto.
+  it("reconoce como propio un saliente que ya está en la base", () => {
+    const store = conProspecto(AHORA);
+    store.recordOutboundLibre("+51999111222", "hola", "wa-out", AHORA);
+
+    expect(store.esMensajeNuestro("wa-out")).toBe(true);
+    expect(store.esMensajeNuestro("wa-desconocido")).toBe(false);
+  });
+
+  it("un entrante nunca cuenta como mensaje nuestro", () => {
+    const store = conProspecto(AHORA);
+    store.recordInbound("+51999111222", "hola", AHORA, {
+      waMessageId: "wa-in",
+      clase: "humano",
+    });
+
+    expect(store.esMensajeNuestro("wa-in")).toBe(false);
+  });
+});

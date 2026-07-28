@@ -35,12 +35,25 @@ export type AckHandler = (
   at: Date,
 ) => void;
 export type FatalHandler = (reason: string) => void;
+/**
+ * El humano escribió desde su propio teléfono a este chat.
+ *
+ * Lleva el `waMessageId` para que quien escuche pueda contrastarlo contra la
+ * base: el Set en memoria del cliente no conoce lo que mandó una ejecución
+ * anterior del proceso.
+ */
+export type EnvioManualHandler = (
+  e164: string,
+  waMessageId: string,
+  at: Date,
+) => void;
 
 export interface WaClient {
   sendText(e164: string, body: string): Promise<string>;
   onInbound(callback: InboundHandler): void;
   onAck(callback: AckHandler): void;
   onFatal(callback: FatalHandler): void;
+  onEnvioManual(callback: EnvioManualHandler): void;
   start(): Promise<void>;
   stop(): Promise<void>;
 }
@@ -147,6 +160,15 @@ export function clasificarCierre(codigo: number | undefined): {
   }
 }
 
+/**
+ * Cuánto se espera antes de dar por manual un `fromMe` desconocido, y cuántos
+ * ids propios se recuerdan. Ver evaluarEnvioPropio.
+ */
+const CUARENTENA_ENVIO_PROPIO_MS = 5_000;
+/** Hasta qué antigüedad se atiende un mensaje de la cola offline. */
+export const MAX_ANTIGUEDAD_OFFLINE_MS = 24 * 60 * 60 * 1_000;
+const MAX_IDS_PROPIOS = 1_000;
+
 /** Cuántas reconexiones seguidas antes de rendirse, y cuánto se espera. */
 const MAX_RECONEXIONES = 8;
 export function esperaReconexion(intento: number): number {
@@ -193,6 +215,44 @@ export function tipoDeMensaje(mensaje: WAMessage["message"]): string {
     : clave.replace(/Message$/, "").toLowerCase();
 }
 
+/**
+ * Cómo se nombra en español lo que no es texto.
+ *
+ * Los tipos que no están acá caen en un genérico. La lista se amplía con lo que
+ * se vea de verdad, no con lo que se imagine.
+ */
+const NOMBRE_MEDIA: Record<string, string> = {
+  audio: "nota de voz",
+  image: "imagen",
+  video: "video",
+  document: "documento",
+  sticker: "sticker",
+  contact: "contacto",
+  location: "ubicación",
+};
+
+/**
+ * El cuerpo que ve el agente y que queda en el hilo.
+ *
+ * Antes, una nota de voz o una foto llegaban con el cuerpo VACÍO: el agente
+ * recibía un turno del prospecto sin nada adentro y contestaba a ciegas, o peor,
+ * se inventaba de qué hablaba. Un marcador explícito le permite decir lo único
+ * honesto —"no puedo escucharlo, ¿me lo escribe?"— y deja el hilo guardado
+ * legible para quien lo abra después.
+ *
+ * Va entre corchetes a propósito: ningún humano escribe así, de modo que el
+ * agente puede distinguirlo del texto real del prospecto.
+ */
+export function cuerpoInbound(
+  mensaje: WAMessage["message"],
+  tipo: string,
+): string {
+  const texto = textoDeMensaje(mensaje);
+  if (texto.trim().length > 0) return texto;
+  if (tipo === "chat" || tipo === "desconocido") return texto;
+  return `[${NOMBRE_MEDIA[tipo] ?? tipo}]`;
+}
+
 export function textoDeMensaje(mensaje: WAMessage["message"]): string {
   if (mensaje === null || mensaje === undefined) return "";
   return (
@@ -220,6 +280,16 @@ export class BaileysClient implements WaClient {
   private readonly inboundHandlers = new Set<InboundHandler>();
   private readonly ackHandlers = new Set<AckHandler>();
   private readonly fatalHandlers = new Set<FatalHandler>();
+  private readonly envioManualHandlers = new Set<EnvioManualHandler>();
+  /**
+   * IDs de los mensajes que envió ESTE proceso.
+   *
+   * Es lo que permite distinguir "lo mandó el bot" de "lo mandó el humano desde
+   * su celular": los dos llegan con `fromMe`. Acotado porque una sesión larga
+   * los acumularía sin fin, y lo viejo ya no sirve — el chequeo ocurre segundos
+   * después del envío, no horas.
+   */
+  private readonly enviadosPropios = new Set<string>();
   private detenido = false;
   /** Reconexiones seguidas sin haber llegado a abrir. Se reinicia al abrir. */
   private intentos = 0;
@@ -255,7 +325,16 @@ export class BaileysClient implements WaClient {
           `El mensaje PUEDE haber salido: revisa el chat antes de reintentar.`,
       );
     }
+    this.recordarPropio(waMessageId);
     return waMessageId;
+  }
+
+  private recordarPropio(waMessageId: string): void {
+    this.enviadosPropios.add(waMessageId);
+    if (this.enviadosPropios.size > MAX_IDS_PROPIOS) {
+      const masViejo = this.enviadosPropios.values().next().value;
+      if (masViejo !== undefined) this.enviadosPropios.delete(masViejo);
+    }
   }
 
   onInbound(callback: InboundHandler): void {
@@ -268,6 +347,10 @@ export class BaileysClient implements WaClient {
 
   onFatal(callback: FatalHandler): void {
     this.fatalHandlers.add(callback);
+  }
+
+  onEnvioManual(callback: EnvioManualHandler): void {
+    this.envioManualHandlers.add(callback);
   }
 
   /**
@@ -429,11 +512,19 @@ export class BaileysClient implements WaClient {
 
   private wireEvents(socket: WASocket): void {
     socket.ev.on("messages.upsert", ({ messages, type }) => {
-      // 'notify' es lo que acaba de llegar. 'append' es historial que Baileys
-      // sincroniza al conectar: procesarlo haría que el agente contestara
-      // conversaciones viejas al arrancar.
-      if (type !== "notify") return;
+      if (type !== "notify" && type !== "append") return;
       for (const mensaje of messages) {
+        // 'append' es todo lo que no llegó en vivo: mezcla la cola de mensajes
+        // que WhatsApp guardó mientras el proceso estaba apagado —que sí hay
+        // que atender— con el historial que se sincroniza al vincular, que no.
+        // Ver messages-recv.js: `node.attrs.offline ? 'append' : 'notify'`.
+        //
+        // Se separan por antigüedad porque no hay otro campo que los distinga.
+        // Antes se ignoraba 'append' entero, y eso significaba que quien
+        // escribiera con el bot caído no recibía respuesta nunca: el mensaje ni
+        // siquiera llegaba a la base, así que tampoco lo rescataba el barrido
+        // de pendientes.
+        if (type === "append" && this.demasiadoViejo(mensaje)) continue;
         this.despacharInbound(mensaje);
       }
     });
@@ -452,8 +543,28 @@ export class BaileysClient implements WaClient {
     });
   }
 
+  /**
+   * ¿Este mensaje es historial viejo y no cola de offline?
+   *
+   * El corte por antigüedad es la única señal disponible para separarlos. Un
+   * día es holgado para lo que buscamos —el bot no debería estar caído tanto—
+   * y contestar algo de hace semanas al reconectar sería peor que perderlo:
+   * delata que del otro lado hay una máquina que acaba de despertar.
+   *
+   * Sin timestamp se descarta: un mensaje de 'append' sin fecha no se puede
+   * distinguir de historial, y de las dos equivocaciones ésta es la barata.
+   */
+  private demasiadoViejo(mensaje: WAMessage): boolean {
+    const segundos = Number(mensaje.messageTimestamp ?? 0);
+    if (segundos <= 0) return true;
+    return Date.now() - segundos * 1_000 > MAX_ANTIGUEDAD_OFFLINE_MS;
+  }
+
   private despacharInbound(mensaje: WAMessage): void {
-    if (mensaje.key.fromMe === true) return;
+    if (mensaje.key.fromMe === true) {
+      void this.evaluarEnvioPropio(mensaje);
+      return;
+    }
     // remoteJid puede venir como @lid; remoteJidAlt trae entonces el jid con el
     // número real. Se prueban los dos y, si ninguno da un teléfono, se descarta:
     // sin número no hay a quién asociarlo en la base. También deja fuera grupos
@@ -469,7 +580,7 @@ export class BaileysClient implements WaClient {
     const segundos = Number(mensaje.messageTimestamp ?? 0);
     const evento: InboundEvent = {
       e164,
-      body: textoDeMensaje(contenido),
+      body: cuerpoInbound(contenido, tipo),
       // El timestamp del mensaje conserva cuándo escribió el prospecto aunque
       // el proceso haya estado ocupado antes de despachar el callback.
       at: segundos > 0 ? new Date(segundos * 1_000) : new Date(),
@@ -481,6 +592,40 @@ export class BaileysClient implements WaClient {
         contenido?.extendedTextMessage?.contextInfo?.quotedMessage !== null,
     };
     for (const handler of this.inboundHandlers) handler(evento);
+  }
+
+  /**
+   * Decide si un mensaje `fromMe` lo escribió una persona desde su teléfono.
+   *
+   * Éste era el peor agujero del sistema: si el dueño entraba a un chat y
+   * contestaba a mano, el bot no se enteraba —descartaba todo `fromMe`— y podía
+   * seguir escribiendo encima suyo delante de un cliente.
+   *
+   * El riesgo al arreglarlo es el inverso, y es peor: confundir un envío del
+   * propio bot con uno manual activaría el takeover sobre nuestro propio
+   * mensaje y mataría esa conversación para siempre. Por eso hay CUARENTENA: si
+   * el id no está registrado, puede ser que la promesa de `sendMessage` todavía
+   * no haya resuelto y no nos haya dado el id. Se espera y se vuelve a mirar.
+   * Un humano tardando cinco segundos más en ser detectado no cuesta nada; un
+   * falso positivo cuesta el prospecto.
+   */
+  private async evaluarEnvioPropio(mensaje: WAMessage): Promise<void> {
+    const id = mensaje.key.id;
+    if (typeof id !== "string") return;
+    if (this.enviadosPropios.has(id)) return;
+
+    const e164 =
+      e164DesdeJid(mensaje.key.remoteJid) ??
+      e164DesdeJid(mensaje.key.remoteJidAlt);
+    if (e164 === null) return;
+
+    await pausa(CUARENTENA_ENVIO_PROPIO_MS);
+    if (this.enviadosPropios.has(id)) return;
+    if (this.detenido) return;
+
+    const segundos = Number(mensaje.messageTimestamp ?? 0);
+    const at = segundos > 0 ? new Date(segundos * 1_000) : new Date();
+    for (const handler of this.envioManualHandlers) handler(e164, id, at);
   }
 
   async stop(): Promise<void> {

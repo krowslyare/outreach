@@ -4,6 +4,7 @@ import { describe, expect, it } from "vitest";
 import {
   ACK_DESDE_BAILEYS,
   clasificarCierre,
+  cuerpoInbound,
   e164DesdeJid,
   esperaReconexion,
   textoDeMensaje,
@@ -147,6 +148,36 @@ describe("tipoDeMensaje", () => {
   it("un mensaje vacío no se hace pasar por chat", () => {
     expect(tipoDeMensaje(null)).toBe("desconocido");
     expect(tipoDeMensaje({})).toBe("desconocido");
+  });
+});
+
+describe("cuerpoInbound", () => {
+  // Antes una nota de voz llegaba al agente con el cuerpo vacío: un turno del
+  // prospecto sin nada adentro, contestado a ciegas o directamente inventado.
+  it("nombra en español lo que no trae texto", () => {
+    expect(cuerpoInbound({ audioMessage: {} }, "audio")).toBe("[nota de voz]");
+    expect(cuerpoInbound({ imageMessage: {} }, "image")).toBe("[imagen]");
+    expect(cuerpoInbound({ documentMessage: {} }, "document")).toBe("[documento]");
+  });
+
+  it("un tipo no listado igual sale marcado y no vacío", () => {
+    expect(cuerpoInbound({ pollCreationMessage: {} }, "pollcreation")).toBe(
+      "[pollcreation]",
+    );
+  });
+
+  // El caption es lo que la persona sí escribió: vale más que el marcador.
+  it("prefiere el texto real cuando existe", () => {
+    expect(cuerpoInbound({ imageMessage: { caption: "mire esto" } }, "image")).toBe(
+      "mire esto",
+    );
+    expect(cuerpoInbound({ conversation: "hola" }, "chat")).toBe("hola");
+  });
+
+  // Un texto vacío de verdad no se disfraza de media.
+  it("no inventa marcador para un chat vacío", () => {
+    expect(cuerpoInbound({ conversation: "" }, "chat")).toBe("");
+    expect(cuerpoInbound(null, "desconocido")).toBe("");
   });
 });
 

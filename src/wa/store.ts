@@ -627,6 +627,70 @@ export class Store {
    * escaló, se suprimió o se descartó con motivo. Mientras esto no corra, el
    * evento sigue siendo elegible para reprocesarse.
    */
+  /**
+   * Entrantes humanos que quedaron sin atender, del más viejo al más nuevo.
+   *
+   * El caso que esto rescata: alguien escribe 21:40, la ventana horaria está
+   * cerrada, `manejarInbound` devuelve `diferido` y —a propósito— NO lo marca
+   * atendido para que se pueda reintentar. Pero nada reintentaba: la deuda
+   * quedaba anotada y nadie la cobraba. Al abrir la ventana, esto los devuelve.
+   *
+   * Sirve además al arrancar el proceso: lo que llegó con el bot apagado, o lo
+   * que quedó a medias porque el LLM o el envío fallaron, entra por acá.
+   *
+   * Solo humanos: un autorespondedor se registra sin `handled_at` y no hay nada
+   * que contestarle.
+   */
+  inboundsPendientes(limite: number): Array<{
+    e164: string;
+    waMessageId: string;
+    at: Date;
+  }> {
+    const filas = this.db
+      .prepare(
+        `select m.e164, m.wa_message_id, m.created_at
+         from messages m
+         join recipients r on r.e164 = m.e164
+         where m.direction = 'in'
+           and m.handled_at is null
+           and coalesce(m.inbound_class, 'humano') = 'humano'
+           and m.wa_message_id is not null
+           and r.suppressed = 0
+           and r.human_takeover = 0
+           and r.source_id not like 'inbound:%'
+         order by m.created_at asc
+         limit ?`,
+      )
+      .all(limite) as Array<{
+      e164: string;
+      wa_message_id: string;
+      created_at: string;
+    }>;
+
+    return filas.map((fila) => ({
+      e164: fila.e164,
+      waMessageId: fila.wa_message_id,
+      at: new Date(fila.created_at),
+    }));
+  }
+
+  /**
+   * ¿Este id lo envió el bot?
+   *
+   * Segunda barrera de la detección de envíos manuales. La primera vive en el
+   * cliente y es un Set en memoria; ésta cubre lo que ese Set no puede: los
+   * mensajes que mandó una ejecución ANTERIOR del proceso. Sin ella, reiniciar
+   * el bot haría que sus propios envíos recientes parecieran escritos a mano.
+   */
+  esMensajeNuestro(waMessageId: string): boolean {
+    const fila = this.db
+      .prepare(
+        "select 1 as hay from messages where wa_message_id = ? and direction = 'out'",
+      )
+      .get(waMessageId) as { hay: number } | undefined;
+    return fila !== undefined;
+  }
+
   marcarInboundAtendido(waMessageId: string, at: Date): void {
     this.db
       .prepare(
