@@ -31,7 +31,7 @@ const HERRAMIENTAS: readonly HerramientaLLM[] = [
   {
     nombre: "escalar_a_humano",
     descripcion:
-      "Pasa la conversación a Hideki. Úsala en cuanto haya intención de contratar, " +
+      "Pasa la conversación al dueño del estudio. Úsala en cuanto haya intención de contratar, " +
       "pedido de reunión o cotización, negociación de precio o condiciones, temas de " +
       "contrato o legales, una queja, un pedido explícito de hablar con una persona, " +
       "o una pregunta de alcance que no puedas responder con el catálogo.",
@@ -54,7 +54,7 @@ const HERRAMIENTAS: readonly HerramientaLLM[] = [
         resumen: {
           type: "string",
           description:
-            "Dos o tres líneas para que Hideki entre en contexto sin leer todo el hilo: " +
+            "Dos o tres líneas para que el dueño entre en contexto sin leer todo el hilo: " +
             "qué necesita, qué plan le calza y en qué quedó la conversación.",
         },
       },

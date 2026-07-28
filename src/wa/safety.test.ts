@@ -93,16 +93,14 @@ describe("canSendNow", () => {
   });
 
   it.each([
-    [1, 3],
-    [2, 3],
-    [3, 5],
-    [4, 5],
-    [5, 10],
-    [7, 10],
-    [8, 15],
-    [14, 15],
-    [15, 20],
-    [99, 20],
+    [1, 30],
+    [2, 30],
+    [3, 40],
+    [4, 40],
+    [5, 50],
+    [7, 50],
+    [8, 60],
+    [99, 60],
   ])("aplica el escalón del día %i con tope %i", (dayIndex, cap) => {
     expect(dailyCap(dayIndex, true)).toBe(cap);
     expect(
@@ -120,24 +118,26 @@ describe("canSendNow", () => {
   it("congela el ramp-up un escalón cuando la señal no está sana", () => {
     const unhealthy = health({
       dayIndex: 5,
-      sentToday: 5,
+      sentToday: 40,
       deviceRate: 0.7,
       deviceRateSample: 30,
       deviceRateBaseline: 0.9,
     });
 
-    expect(dailyCap(5, false)).toBe(5);
+    // Día 5 tiene tope 50; sin salud confirmada retrocede al escalón anterior.
+    expect(dailyCap(5, false)).toBe(40);
     expect(canSendNow(unhealthy, config(), MONDAY_AT_10_LIMA)).toMatchObject({
       allow: false,
-      reason: expect.stringContaining("(5/5"),
+      reason: expect.stringContaining("(40/40"),
     });
   });
 
-  it("mantiene el escalón anterior al tope pleno cuando el día 15 no está sano", () => {
+  it("mantiene el escalón anterior al tope pleno cuando ya salió de la tabla", () => {
     // REGRESIÓN: findIndex devuelve -1 fuera de la tabla, y tratar ese -1 como
-    // "primer escalón" hacía caer el tope de 20 a 3 ante cualquier señal floja.
-    expect(dailyCap(15, false)).toBe(15);
-    expect(dailyCap(99, false)).toBe(15);
+    // "primer escalón" hacía caer el tope pleno al mínimo ante cualquier señal
+    // floja, que es una caída de volumen absurda.
+    expect(dailyCap(15, false)).toBe(50);
+    expect(dailyCap(99, false)).toBe(50);
   });
 
   it("exige la separación mínima y calcula cuándo reintentar", () => {

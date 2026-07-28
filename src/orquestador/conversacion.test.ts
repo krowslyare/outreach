@@ -6,6 +6,7 @@ import type { InboundEvent } from "../wa/client.js";
 import type { AccountHealth, RecipientState } from "../wa/types.js";
 import {
   manejarInbound,
+  reintentarPendientes,
   type ConversacionDeps,
 } from "./conversacion.js";
 
@@ -61,6 +62,7 @@ interface OpcionesDobles {
   historial?: Array<{ direction: "in" | "out"; body: string }>;
   now?: Date;
   ultimoOutboundAt?: Date | null;
+  pendientes?: Array<{ e164: string; waMessageId: string; at: Date }>;
 }
 
 let contadorEventos = 0;
@@ -134,6 +136,7 @@ function crearDobles(opciones: OpcionesDobles = {}) {
     })),
     recordOutboundLibre: vi.fn(),
     setHumanTakeover: vi.fn(),
+    inboundsPendientes: vi.fn(() => opciones.pendientes ?? []),
   };
 
   const deps: ConversacionDeps = {
@@ -335,7 +338,7 @@ describe("manejarInbound", () => {
     expect(enviar).toHaveBeenCalledTimes(1);
   });
 
-  it("escala, activa takeover y avisa al número de Hideki", async () => {
+  it("escala, activa takeover, avisa al humano y le responde al prospecto", async () => {
     const { deps, store, enviar } = crearDobles({
       respuesta: {
         corte: "fin",
@@ -358,12 +361,18 @@ describe("manejarInbound", () => {
     });
 
     expect(store.setHumanTakeover).toHaveBeenCalledWith(E164);
-    expect(enviar).toHaveBeenCalledTimes(1);
+    expect(enviar).toHaveBeenCalledTimes(2);
     expect(enviar).toHaveBeenCalledWith(
       NUMERO_HUMANO,
       expect.stringContaining("Quiere coordinar una llamada esta semana."),
     );
-    expect(enviar).not.toHaveBeenCalledWith(E164, expect.any(String));
+    // Antes esta línea afirmaba lo contrario —que al prospecto NO se le
+    // escribía— y por eso el "me interesa" quedaba sin respuesta hasta que un
+    // humano abriera WhatsApp.
+    expect(enviar).toHaveBeenCalledWith(
+      E164,
+      expect.stringContaining("¿Cómo prefiere"),
+    );
   });
 
   it("marca perdido y suprime al prospecto sin enviar", async () => {
@@ -411,5 +420,153 @@ describe("manejarInbound", () => {
       { rol: "assistant", texto: "Nuestra respuesta" },
       { rol: "user", texto: "Último mensaje" },
     ]);
+  });
+});
+
+describe("las puertas cubren también el handoff", () => {
+  const FUERA_DE_HORARIO = new Date("2026-07-28T04:00:00.000Z"); // 23:00 en Lima
+
+  // REGRESIÓN: el handoff pasó a mandarle un acuse al prospecto, y el bloque de
+  // escalamiento corría ANTES de las puertas. Con eso, un "me interesa" a las
+  // 3am producía un mensaje automático a las 3am.
+  it("un escalamiento fuera de horario no envía nada", async () => {
+    const { deps, enviar, store } = crearDobles({
+      now: FUERA_DE_HORARIO,
+      respuesta: {
+        corte: "fin",
+        texto: "",
+        herramienta: {
+          nombre: "escalar_a_humano",
+          input: { motivo: "quiere_contratar", resumen: "Quiere contratar." },
+        },
+      },
+    });
+
+    await expect(
+      manejarInbound(deps, eventoInbound("Me interesa")),
+    ).resolves.toMatchObject({ accion: "diferido" });
+
+    expect(enviar).not.toHaveBeenCalled();
+    // Sin lock: la conversación no se tomó, así que al abrir la ventana el
+    // barrido puede volver a decidir y esta vez sí escalar.
+    expect(store.setHumanTakeover).not.toHaveBeenCalled();
+    // Sin marcar: la deuda tiene que seguir viva.
+    expect(store.marcarInboundAtendido).not.toHaveBeenCalled();
+  });
+
+  // Con el kill switch activo eran DOS envíos desde una cuenta que hay que
+  // dejar quieta: el aviso al humano y el acuse al prospecto.
+  it("con el kill switch activo no envía ni escala", async () => {
+    const { deps, enviar, generar } = crearDobles({
+      salud: {
+        killSwitch: { tripped: true, reason: "caída de entrega", trippedAt: EN_HORARIO },
+      },
+    });
+
+    await expect(
+      manejarInbound(deps, eventoInbound("Me interesa")),
+    ).resolves.toMatchObject({ accion: "diferido" });
+
+    expect(enviar).not.toHaveBeenCalled();
+    // Tampoco se gasta una llamada al LLM cuyo resultado no se podría usar.
+    expect(generar).not.toHaveBeenCalled();
+  });
+});
+
+describe("reintentarPendientes", () => {
+  const FUERA_DE_HORARIO = new Date("2026-07-28T04:00:00.000Z"); // 23:00 en Lima
+
+  function pendiente(id: string) {
+    return { e164: E164, waMessageId: id, at: EN_HORARIO };
+  }
+
+  // Éste es el caso que motivó todo: escribió 21:40, la ventana estaba cerrada,
+  // el mensaje quedó sin marcar "para reintentarlo" y nadie lo reintentaba.
+  it("contesta al abrir la ventana lo que quedó diferido", async () => {
+    const { deps, enviar, store } = crearDobles({
+      pendientes: [pendiente("wa-in-diferido")],
+      historial: [{ direction: "in", body: "¿Cuánto cuesta?" }],
+    });
+
+    await expect(reintentarPendientes(deps)).resolves.toEqual({
+      numeros: 1,
+      respondidos: 1,
+      siguenDiferidos: 0,
+    });
+
+    expect(enviar).toHaveBeenCalledTimes(1);
+    expect(store.marcarInboundAtendido).toHaveBeenCalledWith(
+      "wa-in-diferido",
+      EN_HORARIO,
+    );
+  });
+
+  // Tres mensajes seguidos merecen UNA respuesta que los lea a los tres, no
+  // tres respuestas encadenadas que se leen como un bot atragantado.
+  it("agrupa varios pendientes del mismo número en una sola respuesta", async () => {
+    const { deps, enviar, generar, store } = crearDobles({
+      pendientes: [pendiente("wa-1"), pendiente("wa-2"), pendiente("wa-3")],
+      historial: [
+        { direction: "in", body: "Hola" },
+        { direction: "in", body: "¿quién habla?" },
+        { direction: "in", body: "¿cuánto cuesta?" },
+      ],
+    });
+
+    await expect(reintentarPendientes(deps)).resolves.toEqual({
+      numeros: 1,
+      respondidos: 1,
+      siguenDiferidos: 0,
+    });
+
+    expect(generar).toHaveBeenCalledTimes(1);
+    expect(enviar).toHaveBeenCalledTimes(1);
+    // Los tres se saldan con esa única respuesta; si no, reaparecen para siempre.
+    for (const id of ["wa-1", "wa-2", "wa-3"]) {
+      expect(store.marcarInboundAtendido).toHaveBeenCalledWith(id, EN_HORARIO);
+    }
+  });
+
+  // Si sigue fuera de horario, la deuda tiene que seguir viva.
+  it("no marca nada si la respuesta se vuelve a diferir", async () => {
+    const { deps, enviar, store } = crearDobles({
+      pendientes: [pendiente("wa-in-diferido")],
+      historial: [{ direction: "in", body: "¿Cuánto cuesta?" }],
+      now: FUERA_DE_HORARIO,
+    });
+
+    await expect(reintentarPendientes(deps)).resolves.toEqual({
+      numeros: 1,
+      respondidos: 0,
+      siguenDiferidos: 1,
+    });
+
+    expect(enviar).not.toHaveBeenCalled();
+    expect(store.marcarInboundAtendido).not.toHaveBeenCalled();
+  });
+
+  it("un número que falla no impide atender al siguiente", async () => {
+    const otro = "+51999333444";
+    const { deps, store, enviar } = crearDobles({
+      pendientes: [
+        { e164: otro, waMessageId: "wa-otro", at: EN_HORARIO },
+        pendiente("wa-mio"),
+      ],
+      historial: [{ direction: "in", body: "¿Cuánto cuesta?" }],
+    });
+    // El primero revienta al enviar; el segundo tiene que salir igual.
+    enviar.mockRejectedValueOnce(new Error("WhatsApp no disponible"));
+
+    await expect(reintentarPendientes(deps)).resolves.toEqual({
+      numeros: 2,
+      respondidos: 1,
+      siguenDiferidos: 0,
+    });
+
+    expect(store.marcarInboundAtendido).not.toHaveBeenCalledWith(
+      "wa-otro",
+      expect.anything(),
+    );
+    expect(store.marcarInboundAtendido).toHaveBeenCalledWith("wa-mio", EN_HORARIO);
   });
 });

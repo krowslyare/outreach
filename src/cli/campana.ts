@@ -8,8 +8,13 @@ import "./env.js";
 import { crearProveedor, modeloAnunciado } from "../llm/index.js";
 import { ejecutarTanda } from "../sequence/campaign.js";
 import { createWaClient, type WaClient } from "../wa/client.js";
-import { enSerie } from "../orquestador/cola.js";
-import { manejarInbound } from "../orquestador/conversacion.js";
+import {
+  atenderNumero,
+  ingerirInbound,
+  reintentarPendientes,
+  type ConversacionDeps,
+} from "../orquestador/conversacion.js";
+import { crearAgrupador } from "../orquestador/rafaga.js";
 import { hardKill } from "../wa/safety.js";
 import { Store } from "../wa/store.js";
 import { DEFAULT_SAFETY_CONFIG } from "../wa/types.js";
@@ -128,10 +133,17 @@ console.info(
     ` · agente: ${modeloAnunciado("agente")}`,
 );
 const store = new Store();
+// Agrupa las ráfagas de un mismo chat en una sola respuesta. Ver rafaga.ts.
+const agrupador = crearAgrupador();
 // Número al que se escala. Sin esto el handoff no tiene a quién avisar, así que
 // se exige explícitamente en vez de fallar recién cuando alguien esté caliente.
 const numeroHumano = process.env.NUMERO_HUMANO?.trim();
 let wa: WaClient | null = null;
+// Se define recién cuando hay sesión de WhatsApp: sin cliente no hay a quién
+// responderle, y un dry-run no debe poder llamar al agente por accidente.
+let depsConversacion: () => ConversacionDeps = () => {
+  throw new Error("no hay sesión de WhatsApp: no se puede atender inbound");
+};
 
 // El horario hábil se abre SOLO apuntando a un número sembrado a mano. Escribir
 // a un prospecto real a las 3am delata al bot y quema la cuenta; hacia un
@@ -205,35 +217,62 @@ try {
 
     wa = createWaClient();
     const waActivo = wa;
+    // Una sola definición para los dos caminos que llaman al agente —el
+    // entrante en vivo y el barrido de pendientes— porque si divergen, uno de
+    // los dos corre con otras puertas de seguridad y nadie lo nota.
+    depsConversacion = () => ({
+      store,
+      proveedor: proveedorAgente,
+      enviar: (destino: string, texto: string) => waActivo.sendText(destino, texto),
+      handoff: { numeroHumano },
+      config,
+      now: () => new Date(),
+      log: (mensaje: string) => console.log(`[inbound] ${mensaje}`),
+    });
     wa.onAck((waMessageId, ack, at) => {
       store.recordAck(waMessageId, ack, at);
     });
     wa.onInbound((evento) => {
-      // Va al ORQUESTADOR, no a handleInbound. handleInbound solo registra y
-      // aplica el opt-out; manejarInbound es el único camino que llama al
-      // agente y ejecuta el handoff. Con el de bajo nivel, un prospecto que
-      // responde durante la tanda queda registrado y sin respuesta — y si
-      // quería contratar, sin escalar.
-      // Serializado POR NÚMERO: dos mensajes seguidos del mismo prospecto
-      // arrancaban dos ejecuciones a la vez, cada una con historial incompleto.
-      // Chats distintos siguen avanzando en paralelo.
-      void enSerie(evento.e164, () =>
-        manejarInbound(
-        {
-          store,
-          proveedor: proveedorAgente,
-          enviar: (destino, texto) => waActivo.sendText(destino, texto),
-          handoff: { numeroHumano },
-          config,
-          now: () => new Date(),
-          log: (mensaje) => console.log(`[inbound] ${mensaje}`),
-        },
-        evento,
-      ),
-      ).catch((error: unknown) => {
-        // Un fallo atendiendo un inbound no debe tumbar la tanda saliente.
-        console.error(`[inbound] error atendiendo ${evento.e164}:`, error);
-      });
+      // Va al ORQUESTADOR, no a handleInbound: aquél solo registra y aplica el
+      // opt-out; el orquestador es el único camino que llama al agente y
+      // ejecuta el handoff. Con el de bajo nivel, un prospecto que responde
+      // durante la tanda queda registrado y sin respuesta — y si quería
+      // contratar, sin escalar.
+      const deps = depsConversacion();
+      // El registro es inmediato —opt-out e idempotencia no pueden esperar— y
+      // solo la RESPUESTA se agrupa. Sin esto, tres mensajes seguidos del mismo
+      // prospecto producían tres respuestas encadenadas: correctas y en orden,
+      // pero inconfundiblemente de una máquina.
+      const ingesta = ingerirInbound(deps, evento);
+      if (!ingesta.atender) return;
+
+      void agrupador
+        .programar(evento.e164, async () => {
+          await atenderNumero(deps, evento.e164);
+        })
+        .catch((error: unknown) => {
+          // Un fallo atendiendo un inbound no debe tumbar la tanda saliente.
+          console.error(`[inbound] error atendiendo ${evento.e164}:`, error);
+        });
+    });
+    wa.onEnvioManual((e164, waMessageId) => {
+      // Segunda barrera: el Set del cliente no conoce lo que mandó una
+      // ejecución anterior. Sin esto, reiniciar el proceso haría que sus
+      // propios envíos recientes parecieran escritos a mano — y el falso
+      // positivo mata la conversación con ese prospecto para siempre.
+      if (store.esMensajeNuestro(waMessageId)) return;
+      // Escribirle a alguien que no es de la campaña es lo normal: es tu
+      // teléfono. loadRecipientState LANZA para un desconocido y esto corre sin
+      // await, así que sin esta guarda la excepción terminaba como unhandled
+      // rejection y se llevaba el proceso entero.
+      if (!store.existeDestinatario(e164)) return;
+      const estado = store.loadRecipientState(e164);
+      if (estado.humanTakeover) return;
+      store.setHumanTakeover(e164);
+      console.info(
+        `[takeover] escribiste a ${e164} desde tu teléfono: el bot ya no le ` +
+          `escribe más a ese número.`,
+      );
     });
     wa.onFatal((reason) => {
       // Un fallo de autenticación o conflicto debe frenar cualquier intento
@@ -286,6 +325,29 @@ try {
   }
 
   if (argumentos.escuchar) {
+    // Cobra lo que quedó debiendo: respuestas diferidas por horario, y lo que
+    // llegó o quedó a medias mientras el proceso no estaba. Se corre una vez al
+    // entrar y después cada pocos minutos; el intervalo es corto frente a la
+    // hora a la que abre la ventana, así que apenas abre se despacha solo.
+    const cobrarPendientes = async (): Promise<void> => {
+      try {
+        const resumen = await reintentarPendientes(depsConversacion());
+        if (resumen.numeros > 0) {
+          console.info(
+            `[pendientes] ${resumen.numeros} número(s): ${resumen.respondidos} ` +
+              `respondido(s), ${resumen.siguenDiferidos} sigue(n) esperando ventana.`,
+          );
+        }
+      } catch (error) {
+        console.error("[pendientes] falló el barrido:", error);
+      }
+    };
+    await cobrarPendientes();
+    const reloj = setInterval(() => void cobrarPendientes(), 5 * 60_000);
+    // Sin unref, este timer solo mantendría el proceso vivo sin razón cuando
+    // todo lo demás ya terminó.
+    reloj.unref();
+
     console.info(
       "\nEscuchando respuestas y ACKs. Ctrl-C para salir.\n" +
         "  Mientras esto corra: las respuestas van al agente y los ACK alimentan\n" +
@@ -295,6 +357,9 @@ try {
     await esperarInterrupcion();
   }
 } finally {
+  // Lo que estaba esperando el silencio se contesta antes de cerrar: descartarlo
+  // dejaría a alguien que escribió sin respuesta y sin nada que lo indique.
+  await agrupador.vaciar();
   if (wa !== null) await wa.stop();
   store.close();
 }
