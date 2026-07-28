@@ -18,6 +18,14 @@ const MAX_POR_DEFECTO = 20;
 export interface OpcionesTanda {
   max?: number;
   dryRun?: boolean;
+  /**
+   * Restringe la tanda a un solo destinatario, para probar contra un teléfono
+   * propio sin que el resto de la cola entre por accidente.
+   *
+   * Filtra la lista de candidatos; NO relaja ninguna puerta. Si ese número no
+   * está en la cola, la tanda no manda nada, que es el resultado correcto.
+   */
+  solo?: string;
 }
 
 export interface MensajeCompuesto {
@@ -82,6 +90,7 @@ const INTENCIONES_APERTURA: readonly IntencionApertura[] = [
   "operativa",
   "permiso",
   "directa",
+  "modelo",
 ];
 
 function intencionParaIndice(indice: number): IntencionApertura {
@@ -145,7 +154,18 @@ export async function ejecutarTanda(
   // — y en dry-run, donde no se persiste nada, el mecanismo de variedad no
   // existía en absoluto.
   const aperturasDeLaTanda: string[] = [];
-  let candidatos = deps.store.candidatosParaContactar(TAMANO_PAGINA, desplazamiento);
+  // El filtro de `--solo` se aplica a la página YA leída, y el desplazamiento
+  // avanza por el tamaño crudo de esa página. Filtrar antes de contar haría dos
+  // cosas mal: correría el offset de menos —saltándose candidatos— y, si el
+  // número buscado no cayera en la primera página, el `while` cortaría con cero
+  // resultados sin llegar nunca a la segunda.
+  const filtrar = (
+    lista: readonly { e164: string; score: number | null }[],
+  ): Array<{ e164: string; score: number | null }> =>
+    opts.solo === undefined
+      ? [...lista]
+      : lista.filter((candidato) => candidato.e164 === opts.solo);
+  let pagina = deps.store.candidatosParaContactar(TAMANO_PAGINA, desplazamiento);
   const resumen: ResumenTanda = {
     enviados: 0,
     saltadosPorDestinatario: 0,
@@ -154,8 +174,8 @@ export async function ejecutarTanda(
     mensajesCompuestos: [],
   };
 
-  while (candidatos.length > 0) {
-   for (const candidato of candidatos) {
+  while (pagina.length > 0) {
+   for (const candidato of filtrar(pagina)) {
     if (producidos >= max) {
       resumen.motivoTerminacion = `alcanzado el máximo de la tanda (${max})`;
       return resumen;
@@ -293,8 +313,8 @@ export async function ejecutarTanda(
     }
    }
 
-   desplazamiento += candidatos.length;
-   candidatos = deps.store.candidatosParaContactar(TAMANO_PAGINA, desplazamiento);
+   desplazamiento += pagina.length;
+   pagina = deps.store.candidatosParaContactar(TAMANO_PAGINA, desplazamiento);
   }
 
   resumen.motivoTerminacion = `tanda completada (${evaluados} candidatos evaluados)`;

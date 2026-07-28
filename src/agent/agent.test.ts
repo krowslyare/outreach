@@ -233,7 +233,7 @@ describe("decidirRespuesta", () => {
         mensajes: expect.any(Array),
         herramientas: expect.any(Array),
         maxTokens: 8000,
-        esfuerzo: "high",
+        esfuerzo: "medium",
       }),
     );
     expect(captura.solicitud()).not.toHaveProperty("model");
@@ -271,12 +271,12 @@ describe("decidirRespuesta", () => {
     ]);
   });
 
-  it("usa effort high por default y respeta el override", async () => {
+  it("usa effort medium por default y respeta el override", async () => {
     const defaultCapture = proveedorCapturador();
     await decidirRespuesta(defaultCapture.proveedor, prospecto, [
       { rol: "prospecto", texto: "Hola" },
     ]);
-    expect(defaultCapture.solicitud().esfuerzo).toBe("high");
+    expect(defaultCapture.solicitud().esfuerzo).toBe("medium");
 
     const overrideCapture = proveedorCapturador();
     await decidirRespuesta(

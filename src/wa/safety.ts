@@ -19,14 +19,30 @@ const DENY = (reason: string, retryAfter: Date | null = null): SendVerdict => ({
 });
 const ALLOW: SendVerdict = { allow: true };
 
-/** Escalones del ramp-up: día → tope diario. Fuera de la tabla, tope pleno. */
+/**
+ * Escalones del ramp-up: día → tope diario. Fuera de la tabla, tope pleno.
+ *
+ * Calibrado para ESTE número, que tiene cinco meses de antigüedad y actividad
+ * previa. La escalera anterior (3/5/10/15) era la de un número recién
+ * registrado, donde el riesgo de baneo es otro.
+ *
+ * Además, empezar tan abajo tenía un costo que no se ve: `deviceRateMinSample`
+ * son 30 mensajes, así que a 3 por día el kill switch pasaba diez días sin
+ * poder evaluar nada — y su señal es justo la que detecta que te están
+ * bloqueando. El ramp ultraconservador retrasaba el instrumento que lo haría
+ * innecesario.
+ *
+ * OJO: el tope cuenta MENSAJES, no prospectos. Desde el día 3 los follow-ups
+ * compiten por el mismo cupo, así que los contactos nuevos por día son bastante
+ * menos que el tope. Por eso la escalera sigue subiendo aunque el objetivo de
+ * conversaciones nuevas se mantenga.
+ */
 const RAMP_LADDER: ReadonlyArray<{ untilDay: number; cap: number }> = [
-  { untilDay: 2, cap: 3 },
-  { untilDay: 4, cap: 5 },
-  { untilDay: 7, cap: 10 },
-  { untilDay: 14, cap: 15 },
+  { untilDay: 2, cap: 30 },
+  { untilDay: 4, cap: 40 },
+  { untilDay: 7, cap: 50 },
 ];
-const RAMP_FULL_CAP = 20;
+const RAMP_FULL_CAP = 60;
 
 /**
  * Tope de envíos para el día.
@@ -193,7 +209,13 @@ export function canContact(
 
   // Si contestó, la cadencia automática se termina: responder es trabajo del
   // agente sobre lo que dijo, no del secuenciador.
-  if (recipient.lastInboundAt !== null) {
+  //
+  // Solo cuenta el entrante HUMANO. Mirar `lastInboundAt` incluía el saludo
+  // automático de WhatsApp Business, que llega a los segundos del primer
+  // contacto y que tiene configurado casi todo establecimiento: con eso, ningún
+  // follow-up de la lista se enviaba nunca y cada prospecto figuraba como "ya
+  // respondió", que es justo lo que uno espera ver en el log.
+  if (recipient.lastHumanInboundAt !== null) {
     return DENY("el destinatario respondió: fuera de la cadencia automática");
   }
 

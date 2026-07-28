@@ -56,7 +56,17 @@ export interface RecipientState {
    */
   firstOutboundAt: Date | null;
   lastOutboundAt: Date | null;
+  /** Cualquier entrante, incluido un saludo automático. Rastro de auditoría. */
   lastInboundAt: Date | null;
+  /**
+   * El último entrante que una PERSONA escribió. Lo único que corta la cadencia.
+   *
+   * Separado de `lastInboundAt` porque casi todo establecimiento tiene saludo
+   * automático de WhatsApp Business y llega segundos después del primer
+   * contacto: tratarlo como respuesta mataba los follow-ups de toda la lista.
+   * Ver clasificar.ts para el criterio, que está sesgado a "humano" a propósito.
+   */
+  lastHumanInboundAt: Date | null;
   /** Cuántos follow-ups se enviaron ya (sin contar el primer mensaje). */
   followUpCount: number;
 }

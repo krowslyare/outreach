@@ -13,6 +13,20 @@ export const ESQUEMA_TEXTO = {
   additionalProperties: false,
 } as const;
 
+/**
+ * Esquema de salida cuando hay herramientas.
+ *
+ * `input` va como STRING con el JSON adentro, no como objeto. No es una
+ * preferencia estética: el modo estricto de OpenAI exige `additionalProperties:
+ * false` en todo objeto del esquema y que TODAS las propiedades estén en
+ * `required`, así que un objeto de forma libre —que es lo que necesita el input
+ * de una herramienta, distinto para cada una— no se puede expresar. Declararlo
+ * como `{type:"object"}` hace que la API rechace la petición entera con un 400,
+ * y el agente termina escalando cada conversación por un error de esquema.
+ *
+ * Por eso también `texto` e `input` están en `required` aunque uno de los dos
+ * sobre según el caso: el modelo manda cadena vacía en el que no aplica.
+ */
 export function esquemaConHerramientas(
   herramientas: readonly HerramientaLLM[],
 ): Record<string, unknown> {
@@ -23,10 +37,20 @@ export function esquemaConHerramientas(
         type: "string",
         enum: ["texto", ...herramientas.map((herramienta) => herramienta.nombre)],
       },
-      texto: { type: "string" },
-      input: { type: "object" },
+      texto: {
+        type: "string",
+        description:
+          'El mensaje a enviar cuando accion es "texto". Cadena vacía si usas una herramienta.',
+      },
+      input: {
+        type: "string",
+        description:
+          "El input de la herramienta como JSON serializado en una cadena, " +
+          'por ejemplo {"motivo":"quiere_contratar","resumen":"..."}. ' +
+          'Cadena vacía si accion es "texto".',
+      },
     },
-    required: ["accion"],
+    required: ["accion", "texto", "input"],
     additionalProperties: false,
   };
 }
@@ -108,9 +132,29 @@ export function interpretarEstructurado(
     texto: typeof valor.texto === "string" ? valor.texto.trim() : "",
     herramienta: {
       nombre: valor.accion,
-      input: esRegistro(valor.input) ? valor.input : {},
+      input: normalizarInput(valor.input),
     },
   };
+}
+
+/**
+ * El input de la herramienta, venga como string con JSON o ya como objeto.
+ *
+ * El esquema pide string, pero se aceptan las dos formas a propósito: son
+ * cuatro proveedores y no todos honran el esquema igual. Estricto al pedir,
+ * tolerante al leer. Un input ilegible devuelve `{}` en vez de tumbar la
+ * respuesta: el agente ya valida los campos que le importan, y perder el
+ * resumen de un escalamiento es mucho mejor que perder el escalamiento.
+ */
+function normalizarInput(valor: unknown): Record<string, unknown> {
+  if (esRegistro(valor)) return valor;
+  if (typeof valor !== "string" || valor.trim() === "") return {};
+  try {
+    const parseado = parsearJsonTolerante(valor);
+    return esRegistro(parseado) ? parseado : {};
+  } catch {
+    return {};
+  }
 }
 
 export function parsearJsonTolerante(texto: string): unknown {

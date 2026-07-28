@@ -54,6 +54,17 @@ function reviewCountSignal(count: number | null): ScoreSignal {
   };
 }
 
+/**
+ * Cuánto vale "no tiene web" según qué tan seguro estemos.
+ *
+ * Exportados porque la revisión manual (cli/revisar.ts) sube un prospecto de
+ * "no se sabe" a "verificado" y tiene que ajustar el score con la MISMA
+ * diferencia. Con el número escrito en dos lados, un cambio acá dejaría los
+ * scores revisados desalineados con los del harvest y nadie lo notaría.
+ */
+export const PUNTOS_SIN_WEB_VERIFICADO = 40;
+export const PUNTOS_SIN_WEB_SIN_VERIFICAR = 22;
+
 export function scoreProspect(p: EnrichedProspect): ScoredProspect {
   const blockers: string[] = [];
   const signals: ScoreSignal[] = [];
@@ -69,23 +80,28 @@ export function scoreProspect(p: EnrichedProspect): ScoredProspect {
   }
 
   if (p.web.websiteUri === null && p.web.matchConfidence >= 0.6) {
+    // Que Places no traiga websiteUri es un dato AUSENTE, no una prueba de que
+    // el negocio no tenga sitio: el match puede ser bueno y el campo estar
+    // simplemente vacío. Por eso vale menos que un verificado.
+    //
+    // Antes esto era un bloqueo duro, y costaba el 90% del pipeline: de 50
+    // prospectos enriquecidos, 2 quedaban contactables. El bloqueo existía para
+    // evitar escribirle "vi que no tienes web" a alguien que sí la tiene — pero
+    // esa afirmación ya no la hace nadie. El compositor recibe `tieneWeb: null`
+    // y con eso compose.ts le ordena explícitamente no afirmarlo y preguntar.
+    //
+    // O sea: la garantía se mudó del filtro al prompt, donde puede distinguir
+    // "no tiene" de "no sé" en vez de tratar los dos como inservibles. Si algún
+    // día el mensaje vuelve a afirmar la ausencia de web, esto tiene que volver
+    // a ser un bloqueo.
+    const verificado = p.web.verificadoSinWeb === true;
     signals.push({
       name: "sin_web",
-      points: 40,
-      detail: p.web.verificadoSinWeb
+      points: verificado ? PUNTOS_SIN_WEB_VERIFICADO : PUNTOS_SIN_WEB_SIN_VERIFICAR,
+      detail: verificado
         ? "verificado: no tiene web"
         : "Places no reporta web (sin verificar)",
     });
-
-    // La señal suma para priorizar, pero no habilita el contacto por sí sola.
-    // Que Places no traiga websiteUri es un dato ausente, no una prueba de que
-    // el negocio no tenga sitio: el match puede ser perfecto y el campo estar
-    // simplemente vacío en Places. Contactar con ese supuesto significa
-    // escribirle "vi que no tienes web" a alguien que sí la tiene, que quema
-    // el prospecto y el pitch de una sola vez.
-    if (p.web.verificadoSinWeb !== true) {
-      blockers.push("falta verificar que realmente no tiene web");
-    }
   }
 
   const marginSignal = classificationSignal(p.classification);

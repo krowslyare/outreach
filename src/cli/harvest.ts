@@ -5,6 +5,8 @@
 //   npm run harvest -- --all-lima      (suelta el filtro de distrito)
 //   npm run harvest -- --enrich --limit 10
 
+import "./env.js";
+
 import { DiskPlacesCache, enrichAll } from "../harvest/places.js";
 import {
   CLASIFICACIONES_MARGEN,

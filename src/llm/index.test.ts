@@ -16,7 +16,7 @@ describe("crearProveedor", () => {
   it.each(["anthropic", "codex", "claude-cli", "gemini"])(
     "crea el proveedor %s",
     (nombre) => {
-      expect(crearProveedor(nombre).nombre).toBe(nombre);
+      expect(crearProveedor("agente", nombre).nombre).toBe(nombre);
     },
   );
 
@@ -31,7 +31,7 @@ describe("crearProveedor", () => {
   });
 
   it("falla con un mensaje claro ante un nombre inválido", () => {
-    expect(() => crearProveedor("otro")).toThrow(
+    expect(() => crearProveedor("agente", "otro")).toThrow(
       'Proveedor LLM desconocido "otro". Usa uno de: anthropic, codex, claude-cli, gemini',
     );
   });

@@ -43,10 +43,14 @@ describe("proveedorCodex", () => {
     const ejecutar: EjecutorSubproceso = vi.fn(
       async (comando, argumentos, opciones) => {
         expect(comando).toBe("codex");
-        expect(argumentos.slice(0, 8)).toEqual([
+        expect(argumentos.slice(0, 10)).toEqual([
           "exec",
           "-m",
           "modelo-prueba",
+          // El esfuerzo del puerto tiene que llegar al CLI: este adaptador lo
+          // descartaba y todo corría en el default.
+          "-c",
+          "model_reasoning_effort=medium",
           "--sandbox",
           "read-only",
           "--skip-git-repo-check",

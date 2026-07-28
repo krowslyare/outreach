@@ -6,8 +6,10 @@
 // decisiones sobre qué puertas de seguridad aplican a una respuesta.
 
 import { decidirRespuesta, type Turno } from "../agent/agent.js";
+import { enSerie } from "./cola.js";
 import { ejecutarHandoff, type HandoffDeps } from "../handoff/handoff.js";
 import type { ProveedorLLM } from "../llm/port.js";
+import type { InboundEvent } from "../wa/client.js";
 import { handleInbound } from "../wa/inbound.js";
 import { zonedParts } from "../wa/safety.js";
 import { CLASIFICACION_STUB_INBOUND, type Store } from "../wa/store.js";
@@ -15,6 +17,9 @@ import type { SafetyConfig } from "../wa/types.js";
 
 export type ResultadoConversacion =
   | { accion: "suprimido" }
+  | { accion: "duplicado" }
+  /** Autorespondedor: se registró, no se contesta y la cadencia sigue viva. */
+  | { accion: "automatico"; razon: string }
   | { accion: "ignorado"; razon: string }
   | { accion: "respondido"; texto: string }
   | { accion: "escalado"; motivo: string }
@@ -25,6 +30,8 @@ export interface ConversacionDeps {
   store: Pick<
     Store,
     | "recordInbound"
+    | "marcarInboundAtendido"
+    | "ultimoOutboundAt"
     | "suppress"
     | "loadRecipientState"
     | "loadConversacion"
@@ -32,10 +39,11 @@ export interface ConversacionDeps {
     | "loadAccountHealth"
     | "recordOutboundLibre"
     | "setHumanTakeover"
+    | "inboundsPendientes"
   >;
   proveedor: ProveedorLLM;
   enviar(e164: string, texto: string): Promise<string>;
-  handoff: Omit<HandoffDeps, "store" | "enviar">;
+  handoff: Omit<HandoffDeps, "store" | "enviar" | "now">;
   config: SafetyConfig;
   now(): Date;
   log?: (mensaje: string) => void;
@@ -73,16 +81,206 @@ function puedeResponder(
   return { ok: true };
 }
 
+/**
+ * Un entrante se marca atendido solo cuando la decisión llegó a un final.
+ *
+ * `duplicado` ya estaba marcado. `diferido` NO lo está a propósito: no se envió
+ * nada y la respuesta se sigue debiendo, así que debe poder reintentarse. Y si
+ * `resolver` lanza —falla el LLM, el handoff o el envío— no se marca nada y el
+ * evento queda elegible para reprocesarse: quedarse callado con alguien que
+ * escribió es peor que contestarle dos veces.
+ */
+function cerroElCiclo(resultado: ResultadoConversacion): boolean {
+  return resultado.accion !== "duplicado" && resultado.accion !== "diferido";
+}
+
+/**
+ * Atiende un entrante de punta a punta, sin agrupar.
+ *
+ * El camino en vivo NO usa esto: separa `ingerirInbound` de `atenderNumero`
+ * para poder agrupar ráfagas. Esto queda como el camino de un solo mensaje
+ * —más fácil de razonar y de testear— y comparte con aquél tanto la ingesta
+ * como la atención, así que no puede divergir en silencio.
+ */
 export async function manejarInbound(
   deps: ConversacionDeps,
-  e164: string,
-  body: string,
-  at: Date,
+  evento: InboundEvent,
 ): Promise<ResultadoConversacion> {
-  // 1. El rastro y el opt-out primero, igual que antes.
-  const inbound = handleInbound({ store: deps.store }, e164, body, at);
-  if (inbound.action === "suppressed") return { accion: "suprimido" };
+  const resultado = await resolver(deps, evento);
+  if (cerroElCiclo(resultado)) {
+    deps.store.marcarInboundAtendido(evento.waMessageId, deps.now());
+  }
+  return resultado;
+}
 
+export interface ResumenReintentos {
+  numeros: number;
+  respondidos: number;
+  siguenDiferidos: number;
+}
+
+/**
+ * Cobra la deuda de entrantes sin atender.
+ *
+ * Existe porque `diferido` dejaba una promesa que nadie cumplía: alguien
+ * escribía 21:40, la ventana estaba cerrada, el mensaje quedaba sin marcar
+ * "para reintentarlo después" y no había ningún después. La persona no recibía
+ * respuesta nunca.
+ *
+ * Se agrupa por número y se atiende UNA vez por persona. Si alguien mandó tres
+ * mensajes mientras estábamos fuera de horario, merece una respuesta que los
+ * lea a los tres, no tres respuestas encadenadas — y los tres se marcan
+ * atendidos con esa única respuesta.
+ *
+ * Serializado con el mismo candado que los entrantes en vivo: sin eso, un
+ * reintento y un mensaje nuevo del mismo prospecto correrían a la vez, cada uno
+ * con la mitad del historial.
+ */
+export async function reintentarPendientes(
+  deps: ConversacionDeps,
+  limite = 20,
+): Promise<ResumenReintentos> {
+  const pendientes = deps.store.inboundsPendientes(limite);
+  // Solo los NÚMEROS distintos: los ids se releen dentro del candado, porque
+  // entre esta foto y el turno de cada chat pueden haber llegado más mensajes
+  // —o alguien más pudo haberlos atendido ya.
+  const numeros = [...new Set(pendientes.map((p) => p.e164))];
+
+  let respondidos = 0;
+  let siguenDiferidos = 0;
+
+  for (const e164 of numeros) {
+    let resultado: ResultadoConversacion;
+    try {
+      resultado = await atenderYSaldar(deps, e164);
+    } catch (error) {
+      // Un fallo con un prospecto no puede impedir que se atienda al siguiente,
+      // y al no marcarse nada este número vuelve a salir en la próxima pasada.
+      deps.log?.(`reintento de ${e164} falló: ${String(error)}`);
+      continue;
+    }
+
+    if (!cerroElCiclo(resultado)) siguenDiferidos += 1;
+    else if (resultado.accion === "respondido") respondidos += 1;
+  }
+
+  return { numeros: numeros.length, respondidos, siguenDiferidos };
+}
+
+/**
+ * Atiende un número y salda los entrantes que esa respuesta cubre.
+ *
+ * Los IDs se marcan solo si la decisión llegó a un final: si volvió a diferirse,
+ * la deuda sigue viva y el número reaparece en la próxima pasada.
+ */
+async function atenderYSaldar(
+  deps: ConversacionDeps,
+  e164: string,
+): Promise<ResultadoConversacion> {
+  return enSerie(e164, async () => {
+    // Los pendientes se leen DENTRO del candado, no antes.
+    //
+    // Leerlos afuera abría dos formas de contestar dos veces. Un barrido que
+    // tarda más que su intervalo se solapa con el siguiente: los dos toman la
+    // misma foto, el candado solo los pone en fila, y el segundo manda una
+    // respuesta duplicada sobre algo que el primero ya atendió. Lo mismo entre
+    // un barrido y un mensaje en vivo del mismo número.
+    //
+    // Adentro del candado, quien llega segundo ve la lista vacía y se va. Un
+    // mensaje repetido es la señal más clara de que del otro lado hay un bot.
+    const pendientes = deps.store.inboundsPendientes(200, e164);
+    if (pendientes.length === 0) return { accion: "duplicado" } as const;
+
+    const resultado = await atender(deps, e164);
+    if (cerroElCiclo(resultado)) {
+      // Se saldan TODOS, no una muestra: `atender` compuso su respuesta con el
+      // historial completo, así que cubre todo lo que estaba pendiente en este
+      // momento. Marcar solo una parte hacía que el resto disparara otra
+      // respuesta después, ya contestada.
+      for (const p of pendientes) {
+        deps.store.marcarInboundAtendido(p.waMessageId, deps.now());
+      }
+    }
+    return resultado;
+  });
+}
+
+/**
+ * Registra un entrante SIN contestarlo todavía.
+ *
+ * Separado de la respuesta para poder agrupar ráfagas. Tres mensajes seguidos
+ * —"Hola" / "¿quién habla?" / "¿cuánto cuesta?", lo más común del mundo en
+ * WhatsApp— producían tres respuestas encadenadas: ordenadas y con contexto,
+ * pero inconfundiblemente de una máquina. Una persona lee los tres y contesta
+ * una vez.
+ *
+ * El registro sí es inmediato: el opt-out y la idempotencia no pueden esperar a
+ * que se cumpla un silencio.
+ */
+export function ingerirInbound(
+  deps: ConversacionDeps,
+  evento: InboundEvent,
+): { atender: boolean; resultado?: ResultadoConversacion } {
+  const inbound = handleInbound({ store: deps.store }, evento);
+  if (inbound.action === "duplicate") {
+    return { atender: false, resultado: { accion: "duplicado" } };
+  }
+  if (inbound.action === "suppressed") {
+    deps.store.marcarInboundAtendido(evento.waMessageId, deps.now());
+    return { atender: false, resultado: { accion: "suprimido" } };
+  }
+  if (inbound.action === "automatic") {
+    deps.log?.(`inbound automático de ${evento.e164}: ${inbound.motivo}`);
+    deps.store.marcarInboundAtendido(evento.waMessageId, deps.now());
+    return {
+      atender: false,
+      resultado: { accion: "automatico", razon: inbound.motivo },
+    };
+  }
+  return { atender: true };
+}
+
+/**
+ * Contesta todo lo que ese número tenga pendiente, en una sola respuesta.
+ *
+ * Es el par de `ingerirInbound`: se llama cuando la ráfaga se aquietó. Toma los
+ * pendientes del store en vez de recibir el evento porque entre la ingesta y
+ * esta llamada pueden haber llegado más mensajes, y todos deben quedar saldados
+ * por la misma respuesta.
+ */
+export async function atenderNumero(
+  deps: ConversacionDeps,
+  e164: string,
+): Promise<ResultadoConversacion> {
+  return atenderYSaldar(deps, e164);
+}
+
+async function resolver(
+  deps: ConversacionDeps,
+  evento: InboundEvent,
+): Promise<ResultadoConversacion> {
+  // Misma ingesta que usa el camino en vivo. No se duplica a propósito: si las
+  // dos versiones divergieran, una correría con otras puertas de seguridad y
+  // los tests de este archivo seguirían en verde igual.
+  const ingesta = ingerirInbound(deps, evento);
+  if (!ingesta.atender) return ingesta.resultado!;
+  return atender(deps, evento.e164);
+}
+
+/**
+ * Todo lo que va DESPUÉS de registrar el entrante: ficha, puertas, agente,
+ * handoff, respuesta.
+ *
+ * Está separado de la ingesta porque un reintento no debe volver a registrar,
+ * reclasificar ni reevaluar el opt-out: eso ya ocurrió cuando el mensaje llegó.
+ * Y porque no necesita el evento — el historial sale del store, así que atender
+ * a alguien con tres mensajes pendientes produce UNA respuesta que los ve todos,
+ * en vez de tres respuestas encadenadas.
+ */
+async function atender(
+  deps: ConversacionDeps,
+  e164: string,
+): Promise<ResultadoConversacion> {
   // 2. Un número que no es de campaña no se contesta solo. Puede ser cualquiera
   //    escribiendo al número; el agente no tiene contexto y responder sería
   //    improvisar.
@@ -106,7 +304,26 @@ export async function manejarInbound(
     return { accion: "ignorado", razon: "destinatario suprimido" };
   }
 
-  // 4. El agente decide.
+  // 4. Las puertas, ANTES de llamar al agente.
+  //
+  // Estaban después, cubriendo solo la respuesta libre. Eso alcanzaba mientras
+  // un escalamiento no producía ningún saliente hacia el prospecto — pero ahora
+  // el handoff le manda el acuse con las tres opciones, así que un "me interesa"
+  // a las 3am generaba un mensaje automático a las 3am, que es exactamente lo
+  // que la ventana horaria existe para evitar. Con el kill switch activo era
+  // peor: dos envíos desde una cuenta que hay que dejar quieta.
+  //
+  // Moverlas acá arriba las vuelve absolutas de verdad, como dice su propio
+  // comentario, y de paso no se gasta una llamada al LLM cuyo resultado no se
+  // podría usar. El entrante queda sin marcar, así que el barrido lo reintenta
+  // al abrir la ventana y ahí sí escala, avisa y responde — todo en horario.
+  const puerta = puedeResponder(deps, deps.now());
+  if (!puerta.ok) {
+    deps.log?.(`respuesta a ${e164} diferida: ${puerta.razon}`);
+    return { accion: "diferido", razon: puerta.razon };
+  }
+
+  // 5. El agente decide.
   const historial: Turno[] = deps.store.loadConversacion(e164).map((m) => ({
     rol: m.direction === "in" ? "prospecto" : "nosotros",
     texto: m.body,
@@ -116,10 +333,10 @@ export async function manejarInbound(
   // del prospecto — que es justo lo que decidirRespuesta exige.
   const decision = await decidirRespuesta(deps.proveedor, ficha, historial);
 
-  // 5. Escalar y perder van al handoff, que pone el lock antes de nada.
+  // 6. Escalar y perder van al handoff, que pone el lock antes de nada.
   if (decision.kind !== "responder") {
     const resultado = await ejecutarHandoff(
-      { ...deps.handoff, store: deps.store, enviar: deps.enviar },
+      { ...deps.handoff, store: deps.store, enviar: deps.enviar, now: deps.now },
       e164,
       ficha.nombre,
       decision,
@@ -130,14 +347,7 @@ export async function manejarInbound(
       : { accion: "perdido", motivo: decision.motivo };
   }
 
-  // 6. Responder, si las puertas lo permiten.
-  const ahora = deps.now();
-  const puerta = puedeResponder(deps, ahora);
-  if (!puerta.ok) {
-    deps.log?.(`respuesta a ${e164} diferida: ${puerta.razon}`);
-    return { accion: "diferido", razon: puerta.razon };
-  }
-
+  // 7. Responder.
   const waMessageId = await deps.enviar(e164, decision.texto);
   deps.store.recordOutboundLibre(e164, decision.texto, waMessageId, deps.now());
   return { accion: "respondido", texto: decision.texto };

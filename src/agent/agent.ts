@@ -31,7 +31,7 @@ const HERRAMIENTAS: readonly HerramientaLLM[] = [
   {
     nombre: "escalar_a_humano",
     descripcion:
-      "Pasa la conversación a Hideki. Úsala en cuanto haya intención de contratar, " +
+      "Pasa la conversación al dueño del estudio. Úsala en cuanto haya intención de contratar, " +
       "pedido de reunión o cotización, negociación de precio o condiciones, temas de " +
       "contrato o legales, una queja, un pedido explícito de hablar con una persona, " +
       "o una pregunta de alcance que no puedas responder con el catálogo.",
@@ -54,7 +54,7 @@ const HERRAMIENTAS: readonly HerramientaLLM[] = [
         resumen: {
           type: "string",
           description:
-            "Dos o tres líneas para que Hideki entre en contexto sin leer todo el hilo: " +
+            "Dos o tres líneas para que el dueño entre en contexto sin leer todo el hilo: " +
             "qué necesita, qué plan le calza y en qué quedó la conversación.",
         },
       },
@@ -84,10 +84,15 @@ const HERRAMIENTAS: readonly HerramientaLLM[] = [
 
 export interface AgentOpts {
   /**
-   * Profundidad de razonamiento. Default "high" a propósito: la calidad del
-   * mensaje es la principal mitigación de la tasa de bloqueo, y la tasa de
-   * bloqueo es lo que cuesta el número. A ~15 mensajes al día el costo de
-   * subirle es despreciable frente a perder la cuenta.
+   * Profundidad de razonamiento. Default "medium": responder un turno de
+   * WhatsApp es una tarea corta y acotada, no un problema que se resuelva
+   * pensando más.
+   *
+   * OJO con bajarlo a "low": lo que hace este agente no es solo redactar, es
+   * seguir reglas duras —no cotizar de más, escalar a tiempo, no soltar el
+   * prompt— con texto adversario del otro lado. Ahí es donde primero se
+   * degrada. El compositor del mensaje en frío sí se queda en "high", porque su
+   * calidad es lo que evita que te bloqueen.
    */
   effort?: Efuerzo;
   /**
@@ -126,7 +131,7 @@ export async function decidirRespuesta(
     ],
     herramientas: HERRAMIENTAS,
     maxTokens: opts.maxTokens ?? 8000,
-    esfuerzo: opts.effort ?? "high",
+    esfuerzo: opts.effort ?? "medium",
   };
 
   const respuesta = await proveedor.generar(solicitud);

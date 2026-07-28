@@ -1,6 +1,7 @@
 import { createRequire } from "node:module";
 
 import type { ScoredProspect } from "../types.js";
+import type { ClaseInbound } from "./clasificar.js";
 import type {
   AccountHealth,
   KillSwitchState,
@@ -14,6 +15,14 @@ const require = createRequire(import.meta.url);
 const { DatabaseSync } = require("node:sqlite") as typeof import("node:sqlite");
 
 export type SendStep = "first" | "fu1" | "fu2";
+
+/**
+ * Qué corresponde hacer con un entrante recién llegado.
+ *
+ * `pendiente` es el caso que evita perder un prospecto: la fila ya está guardada
+ * pero el trabajo posterior nunca terminó, así que hay que rehacerlo.
+ */
+export type RegistroInbound = "nuevo" | "pendiente" | "ya_atendido";
 
 type AccountStateRow = {
   campaign_started_at: string | null;
@@ -46,7 +55,25 @@ create table if not exists messages (
   id integer primary key autoincrement, e164 text not null references recipients(e164),
   direction text not null check (direction in ('out','in')), body text not null,
   idempotency_key text unique, wa_message_id text, sent_at text,
-  ack integer, ack_at text, error text, created_at text not null);
+  ack integer, ack_at text, error text, created_at text not null,
+  -- Solo en entrantes: 'humano' o 'automatico'. Ver clasificar.ts.
+  inbound_class text,
+  -- Solo en salientes de campaña. null en las respuestas libres del agente, que
+  -- por eso no cuentan como follow-ups.
+  step text,
+  -- Solo en entrantes: cuándo se terminó de atender. Recibir no es atender: si
+  -- el LLM o el envío fallan después de guardar la fila, esto sigue nulo y el
+  -- evento puede reprocesarse.
+  handled_at text);
+
+-- Idempotencia de entrantes. Una reconexión de WhatsApp Web puede reemitir
+-- eventos ya procesados; sin esto el mismo mensaje se guarda dos veces y el
+-- agente lo contesta dos veces. Los salientes ya se protegen con
+-- idempotency_key, pero su wa_message_id también es único, así que el índice
+-- cubre ambas direcciones. SQLite permite varios null, que es lo que necesitan
+-- los salientes todavía no enviados.
+create unique index if not exists idx_messages_wa_message_id
+  on messages(wa_message_id);
 
 create table if not exists account_state (
   id integer primary key check (id = 1), campaign_started_at text,
@@ -103,6 +130,28 @@ export const VENTANA_DEVICE_RATE = 60;
  */
 export const CLASIFICACION_STUB_INBOUND = "INBOUND DESCONOCIDO";
 
+/**
+ * `has_website` con TRES estados, no dos.
+ *
+ * Antes era `websiteUri === null ? 0 : 1`, o sea "no sé" se guardaba como "no
+ * tiene". Eso importa porque lo que sale de acá termina en el prompt del
+ * compositor: con `false` se siente autorizado a decirle a alguien "vi que no
+ * tienen web", y si en realidad la tiene, se quema el prospecto y el pitch de
+ * una sola vez.
+ *
+ * Con `null`, compose.ts le dice explícitamente "NO SE PUDO VERIFICAR — no
+ * afirmes que no tiene, pregunta". Ése es el camino que permite contactar al
+ * tramo de confianza media sin mentirle a nadie.
+ *
+ *   1     tiene web (Places la reporta)
+ *   0     verificado que NO tiene (match inequívoco)
+ *   null  no se pudo verificar
+ */
+function estadoWeb(web: ScoredProspect["web"]): number | null {
+  if (web.websiteUri !== null) return 1;
+  return web.verificadoSinWeb === true ? 0 : null;
+}
+
 export class Store {
   private readonly db: InstanceType<typeof DatabaseSync>;
 
@@ -113,6 +162,7 @@ export class Store {
     this.db = new DatabaseSync(filename);
     this.db.exec("pragma foreign_keys = on;");
     this.db.exec(SCHEMA);
+    this.migrar();
     this.db
       .prepare(
         `insert into account_state (id)
@@ -120,6 +170,50 @@ export class Store {
          on conflict (id) do nothing`,
       )
       .run();
+  }
+
+  /**
+   * Agrega columnas nuevas a una base que ya existe.
+   *
+   * `create table if not exists` no toca una tabla ya creada, así que sin esto
+   * una base de una versión anterior sigue corriendo sin las columnas y las
+   * consultas fallan en runtime. Se lee el esquema real en vez de intentar el
+   * `alter` y tragarse el error: así una falla distinta sigue siendo visible.
+   */
+  private migrar(): void {
+    const columnas = new Set(
+      (this.db.prepare("pragma table_info(messages)").all() as Array<{
+        name: string;
+      }>).map((fila) => fila.name),
+    );
+    if (!columnas.has("inbound_class")) {
+      this.db.exec("alter table messages add column inbound_class text");
+    }
+    if (!columnas.has("step")) {
+      this.db.exec("alter table messages add column step text");
+    }
+    if (!columnas.has("handled_at")) {
+      this.db.exec("alter table messages add column handled_at text");
+    }
+
+    // El relleno corre SIEMPRE, no dentro del `if` que agrega la columna. Un
+    // corte entre el `alter` —que commitea solo— y el relleno dejaría la
+    // siguiente arrancada viendo la columna ya presente y saltándose el relleno
+    // para siempre: los salientes de campaña quedarían con step nulo,
+    // followUpCount volvería a 0 y un fu1 ya enviado se elegiría una y otra vez
+    // para morir contra su propia llave de idempotencia, sin llegar nunca a fu2.
+    // Sobre una base al día no toca ninguna fila.
+    //
+    // Los salientes anteriores a esta columna sí tienen el paso, embebido en la
+    // llave de idempotencia (`e164:step`). Rellenarlo deja una sola fuente de
+    // verdad para el conteo de follow-ups en vez de dos predicados que hay que
+    // mantener de acuerdo. El E.164 no contiene ':', así que el primer
+    // separador es el correcto.
+    this.db.exec(
+      `update messages
+       set step = substr(idempotency_key, instr(idempotency_key, ':') + 1)
+       where step is null and idempotency_key is not null`,
+    );
   }
 
   close(): void {
@@ -137,8 +231,19 @@ export class Store {
         name = excluded.name,
         district = excluded.district,
         classification = excluded.classification,
-        score = excluded.score,
-        has_website = excluded.has_website,
+        -- Un harvest posterior NO pisa lo que se resolvió a mano. Places sigue
+        -- devolviendo "no sé" para estos prospectos, así que sin esto una
+        -- reimportación los devolvía a la cola de revisión y borraba el ajuste
+        -- de score: el trabajo manual se perdía sin que nada lo indicara.
+        --
+        -- Un dato NUEVO sí gana: si Places pasa a reportar web, esa información
+        -- es más reciente que la revisión y debe imponerse.
+        score = case
+          when recipients.has_website is not null and excluded.has_website is null
+            then recipients.score
+          else excluded.score
+        end,
+        has_website = coalesce(excluded.has_website, recipients.has_website),
         review_count = excluded.review_count
     `);
     const createdAt = this.clock().toISOString();
@@ -147,7 +252,33 @@ export class Store {
     try {
       for (const prospect of scored) {
         // Un prospecto bloqueado por M2 no debe entrar silenciosamente a la cola.
-        if (!prospect.eligible) continue;
+        //
+        // Pero saltarlo del todo escondía un caso que sí importa: si Places
+        // ahora reporta una web que antes no reportaba, el prospecto pasa a
+        // NO elegible y con `continue` la fila vieja se quedaba tal cual, en la
+        // cola, con su estado anterior. O sea: la información nueva llegaba y se
+        // descartaba, y el bot le seguía escribiendo a un negocio del que ya
+        // sabemos que tiene web.
+        //
+        // No se crean filas nuevas para bloqueados; solo se corrigen las que ya
+        // existen.
+        if (!prospect.eligible) {
+          if (prospect.web.websiteUri !== null) {
+            for (const phone of prospect.phones) {
+              if (phone.kind !== "mobile" || phone.e164 === null) continue;
+              const existe = this.db
+                .prepare("select 1 as hay from recipients where e164 = ?")
+                .get(phone.e164) as { hay: number } | undefined;
+              if (existe === undefined) continue;
+              this.db
+                .prepare("update recipients set has_website = 1 where e164 = ?")
+                .run(phone.e164);
+              // Misma conexión, así que esto se une a la transacción abierta.
+              this.suppress(phone.e164, "harvest posterior: ahora tiene web");
+            }
+          }
+          continue;
+        }
         for (const phone of prospect.phones) {
           if (phone.kind !== "mobile" || phone.e164 === null) continue;
           insert.run(
@@ -158,7 +289,7 @@ export class Store {
             prospect.classification,
             prospect.score,
             createdAt,
-            prospect.web.websiteUri === null ? 0 : 1,
+            estadoWeb(prospect.web),
             prospect.web.userRatingCount,
           );
         }
@@ -208,11 +339,27 @@ export class Store {
          where e164 = ? and direction = 'in'`,
       )
       .get(e164) as MessageTimeRow;
+    // Separado del anterior a propósito: `lastInboundAt` queda como rastro de
+    // auditoría de TODO lo que entró, y solo éste decide sobre la cadencia. Un
+    // saludo automático de WhatsApp Business no es el prospecto respondiendo.
+    const humanInbound = this.db
+      .prepare(
+        `select max(coalesce(sent_at, created_at)) as sent_at
+         from messages
+         where e164 = ? and direction = 'in'
+           and coalesce(inbound_class, 'humano') = 'humano'`,
+      )
+      .get(e164) as MessageTimeRow;
+    // Solo los pasos de campaña. Las respuestas del agente son salientes
+    // enviados igual, pero contarlas hacía que dos o tres respuestas a un
+    // prospecto lo empujaran por encima de maxFollowUps y lo sacaran de la
+    // secuencia sin que nadie hubiera mandado un solo follow-up.
     const sentCount = this.db
       .prepare(
         `select count(*) as count
          from messages
-         where e164 = ? and direction = 'out' and sent_at is not null`,
+         where e164 = ? and direction = 'out' and sent_at is not null
+           and step is not null`,
       )
       .get(e164) as { count: number };
 
@@ -223,6 +370,7 @@ export class Store {
       firstOutboundAt: asDate(firstOutbound.sent_at),
       lastOutboundAt: asDate(outbound.sent_at),
       lastInboundAt: asDate(inbound.sent_at),
+      lastHumanInboundAt: asDate(humanInbound.sent_at),
       followUpCount: Math.max(0, sentCount.count - 1),
     };
   }
@@ -334,10 +482,10 @@ export class Store {
       const result = this.db
         .prepare(
           `insert into messages (
-             e164, direction, body, idempotency_key, created_at
-           ) values (?, 'out', ?, ?, ?)`,
+             e164, direction, body, idempotency_key, step, created_at
+           ) values (?, 'out', ?, ?, ?, ?)`,
         )
-        .run(e164, body, idempotencyKey, this.clock().toISOString());
+        .run(e164, body, idempotencyKey, step, this.clock().toISOString());
       return Number(result.lastInsertRowid);
     } catch (error) {
       // Solo el choque de ESTA llave significa "ya intentado". Una FK u otra
@@ -390,21 +538,361 @@ export class Store {
       .run(ack, at.toISOString(), waMessageId, ack);
   }
 
-  recordInbound(e164: string, body: string, at: Date): void {
+  /**
+   * Si este número se sembró a mano para probar, y no salió del harvest.
+   *
+   * Es la condición que habilita saltarse el horario hábil: hacerlo hacia un
+   * prospecto real a las 3am delata al bot y quema el número, pero hacia un
+   * teléfono propio no protege de nada. La distinción vive en el store y no en
+   * un flag suelto para que la excusa no se pueda invocar sobre cualquiera.
+   */
+  esDestinatarioDePrueba(e164: string): boolean {
+    const fila = this.db
+      .prepare("select source_id from recipients where e164 = ?")
+      .get(e164) as { source_id: string } | undefined;
+    return fila !== undefined && fila.source_id.startsWith("prueba:");
+  }
+
+  /**
+   * Libera los pasos reclamados que nunca confirmaron un envío, para un número
+   * de prueba. Devuelve cuántos liberó.
+   *
+   * `claimSend` reclama la llave ANTES de tocar la red, a propósito: si el
+   * proceso muere después de enviar, preferimos perder el mensaje a duplicarlo.
+   * El costo es que un fallo de envío deja el paso quemado y el reintento choca
+   * con "envío ya reclamado" para siempre.
+   *
+   * Solo toca números de prueba y solo filas con `sent_at` nulo. Aun así hay
+   * ambigüedad —"no se confirmó" no es lo mismo que "no salió"—, y por eso está
+   * limitado a un teléfono propio: ahí el operador puede mirar el chat y
+   * decidir. Sobre un prospecto real esta operación no existe.
+   */
+  liberarEnviosNoConfirmados(e164: string): number {
+    if (!this.esDestinatarioDePrueba(e164)) return 0;
+    const resultado = this.db
+      .prepare(
+        `delete from messages
+         where e164 = ? and direction = 'out' and sent_at is null`,
+      )
+      .run(e164);
+    return Number(resultado.changes);
+  }
+
+  /**
+   * Borra un destinatario sembrado a mano y todo su historial.
+   *
+   * Solo toca filas con `source_id` de prueba. Ésa es la garantía que hace que
+   * este método pueda existir: un prospecto real nunca se borra, porque perder
+   * su historial de mensajes destruye la evidencia de qué se le mandó y cuándo,
+   * que es lo que sostiene la supresión y el conteo de follow-ups.
+   *
+   * Devuelve false si el número no existe o no es de prueba.
+   */
+  eliminarDestinatarioDePrueba(e164: string): boolean {
+    const fila = this.db
+      .prepare("select source_id from recipients where e164 = ?")
+      .get(e164) as { source_id: string } | undefined;
+    if (fila === undefined || !fila.source_id.startsWith("prueba:")) return false;
+
+    this.db.exec("begin immediate");
+    try {
+      this.db.prepare("delete from messages where e164 = ?").run(e164);
+      this.db.prepare("delete from recipients where e164 = ?").run(e164);
+      this.db.exec("commit");
+    } catch (error) {
+      this.db.exec("rollback");
+      throw error;
+    }
+    return true;
+  }
+
+  /**
+   * Último saliente enviado a este número, o null.
+   *
+   * A diferencia de `loadRecipientState`, no exige que el destinatario exista:
+   * hay que poder correlacionar un entrante antes de crear su stub, y para un
+   * número ajeno a la campaña la respuesta correcta es null, no una excepción.
+   */
+  ultimoOutboundAt(e164: string): Date | null {
+    const fila = this.db
+      .prepare(
+        `select max(sent_at) as sent_at
+         from messages
+         where e164 = ? and direction = 'out' and sent_at is not null`,
+      )
+      .get(e164) as MessageTimeRow;
+    return asDate(fila.sent_at);
+  }
+
+  /**
+   * Registra un entrante y dice qué corresponde hacer con él.
+   *
+   * "Recibido" y "atendido" son estados distintos a propósito. Si se tratara
+   * cualquier fila ya existente como procesada, un fallo del LLM, del handoff o
+   * del envío —que ocurren DESPUÉS de este insert— dejaría el mensaje guardado y
+   * sin responder para siempre: una reconexión reemitiría el evento y este
+   * método lo descartaría por duplicado. Un prospecto diciendo "sí, me
+   * interesa" quedaría sin respuesta, que es peor que contestarle dos veces.
+   *
+   * `clase` por defecto 'humano' a propósito: ausente debe significar el lado
+   * conservador, que es cortar la cadencia. Un llamador que no clasifica no
+   * debería, por omisión, dejar a un prospecto recibiendo follow-ups después de
+   * haber contestado.
+   */
+  recordInbound(
+    e164: string,
+    body: string,
+    at: Date,
+    meta: { waMessageId?: string | null; clase?: ClaseInbound } = {},
+  ): RegistroInbound {
     this.ensureInboundRecipient(e164, at);
+    const waMessageId = meta.waMessageId ?? null;
+    // La idempotencia se consulta antes de insertar en vez de depender del
+    // choque del índice: el insert corre dentro de la misma llamada que crea el
+    // stub del destinatario, y distinguir "duplicado" de un error real por el
+    // mensaje de la excepción es frágil.
+    if (waMessageId !== null) {
+      const existing = this.db
+        .prepare("select handled_at from messages where wa_message_id = ?")
+        .get(waMessageId) as { handled_at: string | null } | undefined;
+      if (existing !== undefined) {
+        // No se vuelve a insertar: la fila ya está y el historial la incluye.
+        // Solo cambia si hay que rehacer el trabajo que quedó a medias.
+        return existing.handled_at === null ? "pendiente" : "ya_atendido";
+      }
+    }
+
     this.db
       .prepare(
         `insert into messages (
-           e164, direction, body, sent_at, created_at
-         ) values (?, 'in', ?, ?, ?)`,
+           e164, direction, body, wa_message_id, inbound_class, sent_at, created_at
+         ) values (?, 'in', ?, ?, ?, ?, ?)`,
       )
-      .run(e164, body, at.toISOString(), at.toISOString());
+      .run(
+        e164,
+        body,
+        waMessageId,
+        meta.clase ?? "humano",
+        at.toISOString(),
+        at.toISOString(),
+      );
+    return "nuevo";
+  }
+
+  /**
+   * Marca un entrante como atendido de punta a punta.
+   *
+   * Se llama recién cuando la decisión llegó a un final: se respondió, se
+   * escaló, se suprimió o se descartó con motivo. Mientras esto no corra, el
+   * evento sigue siendo elegible para reprocesarse.
+   */
+  /**
+   * Entrantes humanos que quedaron sin atender, del más viejo al más nuevo.
+   *
+   * El caso que esto rescata: alguien escribe 21:40, la ventana horaria está
+   * cerrada, `manejarInbound` devuelve `diferido` y —a propósito— NO lo marca
+   * atendido para que se pueda reintentar. Pero nada reintentaba: la deuda
+   * quedaba anotada y nadie la cobraba. Al abrir la ventana, esto los devuelve.
+   *
+   * Sirve además al arrancar el proceso: lo que llegó con el bot apagado, o lo
+   * que quedó a medias porque el LLM o el envío fallaron, entra por acá.
+   *
+   * Solo humanos: un autorespondedor se registra sin `handled_at` y no hay nada
+   * que contestarle.
+   */
+  inboundsPendientes(
+    limite: number,
+    e164?: string,
+  ): Array<{
+    e164: string;
+    waMessageId: string;
+    at: Date;
+  }> {
+    // El filtro por número va en el SQL y no después, en memoria. Filtrando
+    // fuera, con 50 pendientes viejos de OTROS chats el límite global dejaba
+    // afuera el mensaje recién llegado: atenderNumero no encontraba nada,
+    // devolvía "duplicado" y el prospecto en vivo se quedaba sin respuesta
+    // hasta el siguiente barrido.
+    const filas = this.db
+      .prepare(
+        `select m.e164, m.wa_message_id, m.created_at
+         from messages m
+         join recipients r on r.e164 = m.e164
+         where m.direction = 'in'
+           and m.handled_at is null
+           and coalesce(m.inbound_class, 'humano') = 'humano'
+           and m.wa_message_id is not null
+           and r.suppressed = 0
+           and r.human_takeover = 0
+           and r.source_id not like 'inbound:%'
+           and (? is null or m.e164 = ?)
+         order by m.created_at asc
+         limit ?`,
+      )
+      .all(e164 ?? null, e164 ?? null, limite) as Array<{
+      e164: string;
+      wa_message_id: string;
+      created_at: string;
+    }>;
+
+    return filas.map((fila) => ({
+      e164: fila.e164,
+      waMessageId: fila.wa_message_id,
+      at: new Date(fila.created_at),
+    }));
+  }
+
+  /**
+   * Prospectos cuyo estado de web quedó en "no se sabe", del mejor score al peor.
+   *
+   * Son los que Places identificó razonablemente pero sin la confianza que hace
+   * falta para afirmar que no tienen web. Ya son contactables —el mensaje no
+   * afirma nada al respecto— pero puntúan por debajo de un verificado, así que
+   * resolverlos a mano es lo que más mueve el orden de la cola.
+   */
+  paraRevisar(limite: number): Array<{
+    e164: string;
+    sourceId: string;
+    nombre: string;
+    distrito: string;
+    score: number | null;
+    resenas: number | null;
+  }> {
+    const filas = this.db
+      .prepare(
+        `select e164, source_id, name, district, score, review_count
+         from recipients
+         where has_website is null
+           and suppressed = 0
+           and human_takeover = 0
+           and source_id not like 'inbound:%'
+         order by score desc, name asc
+         limit ?`,
+      )
+      .all(limite) as Array<{
+      e164: string;
+      source_id: string;
+      name: string;
+      district: string;
+      score: number | null;
+      review_count: number | null;
+    }>;
+
+    return filas.map((fila) => ({
+      e164: fila.e164,
+      sourceId: fila.source_id,
+      nombre: fila.name,
+      distrito: fila.district,
+      score: fila.score,
+      resenas: fila.review_count,
+    }));
+  }
+
+  /**
+   * Asienta el resultado de una revisión manual.
+   *
+   * Con web: se suprime. No es un prospecto — el producto es justamente la web.
+   * Sin web: pasa a verificado y sube el score con la misma diferencia que
+   * aplica el harvest, para que la cola quede ordenada de forma coherente
+   * mezclando revisados y no revisados.
+   *
+   * Devuelve false si el número no estaba pendiente de revisión, para que la CLI
+   * pueda decirlo en vez de fingir que hizo algo.
+   */
+  resolverWeb(e164: string, tieneWeb: boolean, delta: number): boolean {
+    const fila = this.db
+      .prepare(
+        `select source_id, has_website from recipients
+         where e164 = ? and source_id not like 'inbound:%'`,
+      )
+      .get(e164) as
+      | { source_id: string; has_website: number | null }
+      | undefined;
+    if (fila === undefined || fila.has_website !== null) return false;
+
+    // La revisión es sobre el ESTABLECIMIENTO, no sobre un teléfono. Un mismo
+    // source_id puede tener varios móviles y por lo tanto varias filas; aplicar
+    // el resultado a una sola dejaba las demás contactables, así que el bot
+    // podía escribirle al mismo negocio por otro número después de que alguien
+    // ya hubiera verificado que tiene web.
+    const hermanos = this.db
+      .prepare(
+        `select e164 from recipients
+         where source_id = ? and has_website is null`,
+      )
+      .all(fila.source_id) as Array<{ e164: string }>;
+
+    for (const { e164: numero } of hermanos) {
+      if (tieneWeb) {
+        this.db
+          .prepare("update recipients set has_website = 1 where e164 = ?")
+          .run(numero);
+        this.suppress(numero, "revisión manual: ya tiene web");
+      } else {
+        this.db
+          .prepare(
+            `update recipients
+             set has_website = 0, score = coalesce(score, 0) + ?
+             where e164 = ?`,
+          )
+          .run(delta, numero);
+      }
+    }
+    return true;
+  }
+
+  /**
+   * ¿Este número existe como destinatario?
+   *
+   * Existe porque `loadRecipientState` LANZA para un desconocido, y hay un
+   * llamador —la detección de envíos manuales— donde eso no es un error sino lo
+   * normal: el dueño le escribe a cualquiera desde su teléfono vinculado. Ahí la
+   * excepción viajaba por un `void` sin await y terminaba como unhandled
+   * rejection, o sea el proceso caído y el listener con él.
+   */
+  existeDestinatario(e164: string): boolean {
+    const fila = this.db
+      .prepare("select 1 as hay from recipients where e164 = ?")
+      .get(e164) as { hay: number } | undefined;
+    return fila !== undefined;
+  }
+
+  /**
+   * ¿Este id lo envió el bot?
+   *
+   * Segunda barrera de la detección de envíos manuales. La primera vive en el
+   * cliente y es un Set en memoria; ésta cubre lo que ese Set no puede: los
+   * mensajes que mandó una ejecución ANTERIOR del proceso. Sin ella, reiniciar
+   * el bot haría que sus propios envíos recientes parecieran escritos a mano.
+   */
+  esMensajeNuestro(waMessageId: string): boolean {
+    const fila = this.db
+      .prepare(
+        "select 1 as hay from messages where wa_message_id = ? and direction = 'out'",
+      )
+      .get(waMessageId) as { hay: number } | undefined;
+    return fila !== undefined;
+  }
+
+  marcarInboundAtendido(waMessageId: string, at: Date): void {
+    this.db
+      .prepare(
+        `update messages
+         set handled_at = ?
+         where wa_message_id = ? and direction = 'in' and handled_at is null`,
+      )
+      .run(at.toISOString(), waMessageId);
   }
 
   /**
    * La conversación en orden cronológico, para armar el historial del agente.
    * Solo mensajes efectivamente enviados o recibidos: un saliente reclamado
    * pero nunca enviado no forma parte de lo que el prospecto vio.
+   *
+   * Los entrantes automáticos quedan fuera: se registran para auditoría, pero
+   * ponerlos en el historial le da al agente un turno del "prospecto" que el
+   * prospecto nunca escribió. "En breve un asesor lo atenderá" leído como
+   * intención es exactamente el falso positivo que hay que evitar.
    */
   loadConversacion(e164: string): Array<{ direction: "in" | "out"; body: string }> {
     return this.db
@@ -412,7 +900,10 @@ export class Store {
         `select direction, body
          from messages
          where e164 = ?
-           and (direction = 'in' or sent_at is not null)
+           and (
+             (direction = 'in' and coalesce(inbound_class, 'humano') = 'humano')
+             or (direction = 'out' and sent_at is not null)
+           )
          order by coalesce(sent_at, created_at) asc, id asc`,
       )
       .all(e164) as Array<{ direction: "in" | "out"; body: string }>;
@@ -487,6 +978,12 @@ export class Store {
    * respondió: si alguien contestó, la cadencia automática se terminó y lo que
    * corresponde es responderle, no seguir empujando la secuencia.
    *
+   * "Respondió" significa un entrante HUMANO. Filtrar por cualquier entrante
+   * dejaba fuera a todo el que tuviera saludo automático de WhatsApp Business
+   * configurado —casi todos— y esos follow-ups no se enviaban jamás. Este
+   * filtro tiene que decir lo mismo que canContact: si divergen, un candidato
+   * pasa la consulta y muere en la puerta, o al revés.
+   *
    * Excluye también los stubs de inbound: nunca fueron prospectos de campaña.
    */
   candidatosParaContactar(
@@ -500,9 +997,13 @@ export class Store {
          where r.suppressed = 0
            and r.human_takeover = 0
            and r.source_id not like 'inbound:%'
+           -- Defensa en profundidad: el producto ES la web. Quien ya tiene una
+           -- no se contacta aunque por algún camino haya quedado sin suprimir.
+           and coalesce(r.has_website, 0) = 0
            and not exists (
              select 1 from messages m
              where m.e164 = r.e164 and m.direction = 'in'
+               and coalesce(m.inbound_class, 'humano') = 'humano'
            )
          order by r.score desc nulls last, r.e164 asc
          limit ? offset ?`,

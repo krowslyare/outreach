@@ -11,6 +11,13 @@ export interface StoreHandoff {
   loadRecipientState(e164: string): { humanTakeover: boolean };
   setHumanTakeover(e164: string): void;
   suppress(e164: string, reason: string): void;
+  /** El acuse al prospecto también es un saliente y tiene que quedar en el hilo. */
+  recordOutboundLibre(
+    e164: string,
+    body: string,
+    waMessageId: string,
+    at: Date,
+  ): void;
 }
 
 /**
@@ -33,6 +40,7 @@ export interface HandoffDeps {
   enviar(e164: string, texto: string): Promise<string>;
   /** Número de Hideki, en E.164. */
   numeroHumano: string;
+  now(): Date;
   portal?: PortalClient;
   log?: (mensaje: string) => void;
 }
@@ -90,7 +98,29 @@ export async function ejecutarHandoff(
     deps.log?.(`FALLÓ la notificación de handoff para ${e164}: ${String(error)}`);
   }
 
-  // Paso 3 — el portal, si está configurado.
+  // Paso 3 — cerrarle el turno al prospecto.
+  //
+  // Antes no existía: el lock dejaba al bot mudo y el prospecto se quedaba
+  // mirando su propio "me interesa" sin respuesta hasta que un humano abriera
+  // WhatsApp. El mensaje más caliente de todo el flujo era el único que recibía
+  // silencio, y de madrugada eso son horas.
+  //
+  // Va DESPUÉS del aviso a propósito: si algo va a fallar, es preferible que
+  // falle esto —el prospecto espera sin saberlo— a que falle el aviso, que es
+  // el único camino por el que alguien se entera y lo arregla.
+  try {
+    const texto = mensajeParaProspecto(decision);
+    const waMessageId = await deps.enviar(e164, texto);
+    // Se registra como cualquier otro saliente. Sin esto, lo ÚLTIMO que le
+    // dijimos al prospecto no existía en la base: el hilo guardado terminaba en
+    // su "me interesa" y quien abriera el historial —o el agente, si algún día
+    // se levanta el takeover— no vería que ya le respondimos.
+    deps.store.recordOutboundLibre(e164, texto, waMessageId, deps.now());
+  } catch (error) {
+    deps.log?.(`FALLÓ el acuse al prospecto ${e164}: ${String(error)}`);
+  }
+
+  // Paso 4 — el portal, si está configurado.
   let portalOk = false;
   if (deps.portal !== undefined) {
     try {
@@ -107,6 +137,41 @@ export async function ejecutarHandoff(
   }
 
   return { estado: "ejecutado", notificado, portalOk };
+}
+
+/**
+ * Lo que le llega al prospecto cuando la conversación pasa a un humano.
+ *
+ * Es texto fijo y no una respuesta del modelo, por dos razones. Es el mensaje
+ * más caro del flujo —la persona ya dijo que le interesa— así que no se juega a
+ * que el modelo tenga un buen día. Y el agente, cuando escala, devuelve la
+ * herramienta y NADA de texto (ver interpretarDecision en agent.ts), de modo que
+ * éste es el único mensaje que sale: no hay riesgo de decir dos cosas distintas.
+ *
+ * Nunca dice "Hideki". Un nombre propio que la persona no ha oído nunca no
+ * genera confianza, genera "¿y ése quién es?". El rol sí se entiende, y el
+ * nombre lo pone el propio Hideki cuando entra al chat.
+ */
+export function mensajeParaProspecto(
+  decision: Extract<AgentDecision, { kind: "escalar" }>,
+): string {
+  // Una queja no se responde con un menú de opciones: ofrecerle a alguien
+  // molesto que elija entre llamada y reunión suena a que no lo escucharon.
+  if (decision.motivo === "queja") {
+    return (
+      "Entiendo, y lamento el inconveniente. Lo paso ahora mismo con la persona " +
+      "a cargo para que lo vea con usted directamente."
+    );
+  }
+
+  // Tres opciones y no solo "una llamada": la llamada tiene fricción —hay que
+  // agendarla, contestar, estar libre— y seguir por el chat no tiene ninguna.
+  // Dejar elegir quita la excusa de "ahorita no puedo hablar".
+  return (
+    "Perfecto. Le paso la conversación con el dueño del estudio para que lo " +
+    "vea con usted directamente.\n" +
+    "¿Cómo prefiere: una llamada corta, una reunión, o seguimos por acá?"
+  );
 }
 
 const ETIQUETA_MOTIVO: Record<string, string> = {
