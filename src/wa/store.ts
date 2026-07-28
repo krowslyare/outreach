@@ -130,6 +130,28 @@ export const VENTANA_DEVICE_RATE = 60;
  */
 export const CLASIFICACION_STUB_INBOUND = "INBOUND DESCONOCIDO";
 
+/**
+ * `has_website` con TRES estados, no dos.
+ *
+ * Antes era `websiteUri === null ? 0 : 1`, o sea "no sé" se guardaba como "no
+ * tiene". Eso importa porque lo que sale de acá termina en el prompt del
+ * compositor: con `false` se siente autorizado a decirle a alguien "vi que no
+ * tienen web", y si en realidad la tiene, se quema el prospecto y el pitch de
+ * una sola vez.
+ *
+ * Con `null`, compose.ts le dice explícitamente "NO SE PUDO VERIFICAR — no
+ * afirmes que no tiene, pregunta". Ése es el camino que permite contactar al
+ * tramo de confianza media sin mentirle a nadie.
+ *
+ *   1     tiene web (Places la reporta)
+ *   0     verificado que NO tiene (match inequívoco)
+ *   null  no se pudo verificar
+ */
+function estadoWeb(web: ScoredProspect["web"]): number | null {
+  if (web.websiteUri !== null) return 1;
+  return web.verificadoSinWeb === true ? 0 : null;
+}
+
 export class Store {
   private readonly db: InstanceType<typeof DatabaseSync>;
 
@@ -230,7 +252,7 @@ export class Store {
             prospect.classification,
             prospect.score,
             createdAt,
-            prospect.web.websiteUri === null ? 0 : 1,
+            estadoWeb(prospect.web),
             prospect.web.userRatingCount,
           );
         }

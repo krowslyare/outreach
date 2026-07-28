@@ -494,3 +494,35 @@ describe("pendientes y autoría de mensajes", () => {
     expect(store.esMensajeNuestro("wa-in")).toBe(false);
   });
 });
+
+describe("has_website con tres estados", () => {
+  const stores: Store[] = [];
+  afterEach(() => {
+    for (const store of stores.splice(0)) store.close();
+  });
+
+  function importado(web: Partial<ScoredProspect["web"]>): boolean | null {
+    const store = new Store(":memory:");
+    stores.push(store);
+    const base = scored("A", "+51999111222");
+    store.importRecipients([{ ...base, web: { ...base.web, ...web } }]);
+    return store.loadFichaProspecto("+51999111222")!.tieneWeb;
+  }
+
+  // LA regresión que costaba el 90% del pipeline en el otro sentido: guardar
+  // "no sé" como "no tiene" autoriza al compositor a decirle a alguien "vi que
+  // no tienen web" cuando en realidad nadie lo verificó.
+  it("sin verificar llega como 'no sé', no como 'no tiene'", () => {
+    expect(importado({ websiteUri: null, verificadoSinWeb: false })).toBeNull();
+  });
+
+  it("verificado sin web llega como false", () => {
+    expect(importado({ websiteUri: null, verificadoSinWeb: true })).toBe(false);
+  });
+
+  it("con web llega como true aunque no se haya 'verificado'", () => {
+    expect(
+      importado({ websiteUri: "https://ejemplo.pe", verificadoSinWeb: false }),
+    ).toBe(true);
+  });
+});

@@ -30,7 +30,11 @@ function enriched(overrides: Partial<EnrichedProspect> = {}): EnrichedProspect {
 
 describe("scoreProspect", () => {
   it("suma señales y limita el score a 100", () => {
-    const result = scoreProspect(enriched());
+    const base = enriched();
+    const result = scoreProspect({
+      ...base,
+      web: { ...base.web, verificadoSinWeb: true },
+    });
 
     expect(result.score).toBe(100);
     expect(result.signals.map((signal) => signal.points)).toEqual([
@@ -38,16 +42,29 @@ describe("scoreProspect", () => {
     ]);
   });
 
-  it("no habilita el contacto mientras no se verifique la ausencia de web", () => {
-    // Que Places no traiga websiteUri es un dato ausente, no una prueba. La
-    // señal suma para priorizar, pero el prospecto no es contactable hasta que
-    // alguien confirme: escribirle "vi que no tienes web" a quien sí la tiene
-    // quema el prospecto y el pitch de una sola vez.
+  it("contacta sin verificar, pero puntúa menos que un verificado", () => {
+    // Que Places no traiga websiteUri es un dato ausente, no una prueba, así
+    // que vale menos. Ya NO bloquea: ese bloqueo costaba el 90% del pipeline y
+    // protegía contra una afirmación que el mensaje ya no hace. La garantía
+    // vive ahora en compose.ts, que con `tieneWeb: null` ordena preguntar en
+    // vez de afirmar. Si el mensaje vuelve a afirmar la ausencia de web, esto
+    // tiene que volver a ser un bloqueo.
     const result = scoreProspect(enriched());
 
-    expect(result.score).toBe(100);
-    expect(result.eligible).toBe(false);
-    expect(result.blockers).toContain("falta verificar que realmente no tiene web");
+    expect(result.eligible).toBe(true);
+    expect(result.blockers).toEqual([]);
+    const sinWeb = result.signals.find((s) => s.name === "sin_web");
+    expect(sinWeb?.points).toBe(22);
+    expect(sinWeb?.detail).toContain("sin verificar");
+
+    // Un verificado tiene que seguir puntuando por encima, o el orden de la
+    // cola dejaría de reflejar la calidad del dato.
+    const base = enriched();
+    const verificado = scoreProspect({
+      ...base,
+      web: { ...base.web, verificadoSinWeb: true },
+    });
+    expect(verificado.score).toBeGreaterThan(result.score);
   });
 
   it("habilita el contacto cuando la ausencia de web está verificada", () => {
