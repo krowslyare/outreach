@@ -54,6 +54,17 @@ function reviewCountSignal(count: number | null): ScoreSignal {
   };
 }
 
+/**
+ * Cuánto vale "no tiene web" según qué tan seguro estemos.
+ *
+ * Exportados porque la revisión manual (cli/revisar.ts) sube un prospecto de
+ * "no se sabe" a "verificado" y tiene que ajustar el score con la MISMA
+ * diferencia. Con el número escrito en dos lados, un cambio acá dejaría los
+ * scores revisados desalineados con los del harvest y nadie lo notaría.
+ */
+export const PUNTOS_SIN_WEB_VERIFICADO = 40;
+export const PUNTOS_SIN_WEB_SIN_VERIFICAR = 22;
+
 export function scoreProspect(p: EnrichedProspect): ScoredProspect {
   const blockers: string[] = [];
   const signals: ScoreSignal[] = [];
@@ -86,7 +97,7 @@ export function scoreProspect(p: EnrichedProspect): ScoredProspect {
     const verificado = p.web.verificadoSinWeb === true;
     signals.push({
       name: "sin_web",
-      points: verificado ? 40 : 22,
+      points: verificado ? PUNTOS_SIN_WEB_VERIFICADO : PUNTOS_SIN_WEB_SIN_VERIFICAR,
       detail: verificado
         ? "verificado: no tiene web"
         : "Places no reporta web (sin verificar)",

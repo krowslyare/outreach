@@ -697,6 +697,90 @@ export class Store {
   }
 
   /**
+   * Prospectos cuyo estado de web quedó en "no se sabe", del mejor score al peor.
+   *
+   * Son los que Places identificó razonablemente pero sin la confianza que hace
+   * falta para afirmar que no tienen web. Ya son contactables —el mensaje no
+   * afirma nada al respecto— pero puntúan por debajo de un verificado, así que
+   * resolverlos a mano es lo que más mueve el orden de la cola.
+   */
+  paraRevisar(limite: number): Array<{
+    e164: string;
+    sourceId: string;
+    nombre: string;
+    distrito: string;
+    score: number | null;
+    resenas: number | null;
+  }> {
+    const filas = this.db
+      .prepare(
+        `select e164, source_id, name, district, score, review_count
+         from recipients
+         where has_website is null
+           and suppressed = 0
+           and human_takeover = 0
+           and source_id not like 'inbound:%'
+         order by score desc, name asc
+         limit ?`,
+      )
+      .all(limite) as Array<{
+      e164: string;
+      source_id: string;
+      name: string;
+      district: string;
+      score: number | null;
+      review_count: number | null;
+    }>;
+
+    return filas.map((fila) => ({
+      e164: fila.e164,
+      sourceId: fila.source_id,
+      nombre: fila.name,
+      distrito: fila.district,
+      score: fila.score,
+      resenas: fila.review_count,
+    }));
+  }
+
+  /**
+   * Asienta el resultado de una revisión manual.
+   *
+   * Con web: se suprime. No es un prospecto — el producto es justamente la web.
+   * Sin web: pasa a verificado y sube el score con la misma diferencia que
+   * aplica el harvest, para que la cola quede ordenada de forma coherente
+   * mezclando revisados y no revisados.
+   *
+   * Devuelve false si el número no estaba pendiente de revisión, para que la CLI
+   * pueda decirlo en vez de fingir que hizo algo.
+   */
+  resolverWeb(e164: string, tieneWeb: boolean, delta: number): boolean {
+    const fila = this.db
+      .prepare(
+        `select has_website from recipients
+         where e164 = ? and source_id not like 'inbound:%'`,
+      )
+      .get(e164) as { has_website: number | null } | undefined;
+    if (fila === undefined || fila.has_website !== null) return false;
+
+    if (tieneWeb) {
+      this.db
+        .prepare("update recipients set has_website = 1 where e164 = ?")
+        .run(e164);
+      this.suppress(e164, "revisión manual: ya tiene web");
+      return true;
+    }
+
+    this.db
+      .prepare(
+        `update recipients
+         set has_website = 0, score = coalesce(score, 0) + ?
+         where e164 = ?`,
+      )
+      .run(delta, e164);
+    return true;
+  }
+
+  /**
    * ¿Este id lo envió el bot?
    *
    * Segunda barrera de la detección de envíos manuales. La primera vive en el

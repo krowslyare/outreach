@@ -526,3 +526,62 @@ describe("has_website con tres estados", () => {
     ).toBe(true);
   });
 });
+
+describe("revisión manual del tramo sin verificar", () => {
+  const stores: Store[] = [];
+  afterEach(() => {
+    for (const store of stores.splice(0)) store.close();
+  });
+
+  function conPendiente(): Store {
+    const store = new Store(":memory:");
+    stores.push(store);
+    const base = scored("A", "+51999111222");
+    store.importRecipients([
+      { ...base, score: 50, web: { ...base.web, verificadoSinWeb: false } },
+    ]);
+    return store;
+  }
+
+  it("lista solo los que quedaron en 'no se sabe'", () => {
+    const store = conPendiente();
+    const base = scored("B", "+51999333444");
+    store.importRecipients([
+      { ...base, web: { ...base.web, verificadoSinWeb: true } },
+    ]);
+
+    expect(store.paraRevisar(10).map((p) => p.e164)).toEqual(["+51999111222"]);
+  });
+
+  // Confirmar que no tiene web es información nueva: tiene que reflejarse en el
+  // orden de la cola, o revisar no serviría de nada.
+  it("confirmar que no tiene web sube el score y sale de la lista", () => {
+    const store = conPendiente();
+
+    expect(store.resolverWeb("+51999111222", false, 18)).toBe(true);
+    expect(store.loadFichaProspecto("+51999111222")!.tieneWeb).toBe(false);
+    expect(store.paraRevisar(10)).toEqual([]);
+    expect(
+      store.candidatosParaContactar(10).find((c) => c.e164 === "+51999111222")
+        ?.score,
+    ).toBe(68);
+  });
+
+  // El producto ES la web: quien ya tiene una no es prospecto.
+  it("marcar que sí tiene web lo saca de la cola", () => {
+    const store = conPendiente();
+
+    expect(store.resolverWeb("+51999111222", true, 18)).toBe(true);
+    expect(store.loadRecipientState("+51999111222").suppressed).toBe(true);
+    expect(store.candidatosParaContactar(10)).toEqual([]);
+  });
+
+  // Sin esto, un tipeo en el número se leería como revisión hecha.
+  it("no finge haber resuelto algo que no estaba pendiente", () => {
+    const store = conPendiente();
+    store.resolverWeb("+51999111222", false, 18);
+
+    expect(store.resolverWeb("+51999111222", true, 18)).toBe(false);
+    expect(store.resolverWeb("+51900000000", false, 18)).toBe(false);
+  });
+});
