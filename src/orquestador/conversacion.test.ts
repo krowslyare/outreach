@@ -136,7 +136,14 @@ function crearDobles(opciones: OpcionesDobles = {}) {
     })),
     recordOutboundLibre: vi.fn(),
     setHumanTakeover: vi.fn(),
-    inboundsPendientes: vi.fn(() => opciones.pendientes ?? []),
+    // Honra el filtro por número como el store real: ahora la consulta ocurre
+    // dentro del candado y el filtro es parte de la garantía, no un detalle.
+    inboundsPendientes: vi.fn((_limite: number, soloE164?: string) => {
+      const todos = opciones.pendientes ?? [];
+      return soloE164 === undefined
+        ? todos
+        : todos.filter((p) => p.e164 === soloE164);
+    }),
   };
 
   const deps: ConversacionDeps = {
@@ -543,6 +550,49 @@ describe("reintentarPendientes", () => {
 
     expect(enviar).not.toHaveBeenCalled();
     expect(store.marcarInboundAtendido).not.toHaveBeenCalled();
+  });
+
+  // Un barrido que tarda más que su intervalo se solapa con el siguiente: los
+  // dos tomaban la misma foto y el segundo mandaba una respuesta duplicada. Un
+  // mensaje repetido es la señal más clara de que del otro lado hay un bot.
+  it("dos barridos solapados no contestan dos veces", async () => {
+    const { deps, enviar, store } = crearDobles({
+      pendientes: [pendiente("wa-solapado")],
+      historial: [{ direction: "in", body: "¿Cuánto cuesta?" }],
+    });
+    // El doble simula el store real: lo marcado deja de estar pendiente.
+    const atendidos = new Set<string>();
+    vi.mocked(store.marcarInboundAtendido).mockImplementation((id) => {
+      atendidos.add(id);
+    });
+    vi.mocked(store.inboundsPendientes).mockImplementation((_limite, soloE164) =>
+      [pendiente("wa-solapado")].filter(
+        (p) =>
+          !atendidos.has(p.waMessageId) &&
+          (soloE164 === undefined || p.e164 === soloE164),
+      ),
+    );
+
+    await Promise.all([reintentarPendientes(deps), reintentarPendientes(deps)]);
+
+    expect(enviar).toHaveBeenCalledTimes(1);
+  });
+
+  // atender compone con el historial COMPLETO, así que cubre todo lo pendiente
+  // en ese momento. Saldar solo una parte hacía que el resto disparara otra
+  // respuesta después, ya contestada.
+  it("salda todos los pendientes del número, no solo los de la foto", async () => {
+    const { deps, store } = crearDobles({
+      pendientes: [pendiente("wa-1"), pendiente("wa-2"), pendiente("wa-3")],
+      historial: [{ direction: "in", body: "hola" }],
+    });
+
+    // El barrido toma una foto de UN solo id; adentro del candado aparecen tres.
+    await reintentarPendientes(deps, 1);
+
+    for (const id of ["wa-1", "wa-2", "wa-3"]) {
+      expect(store.marcarInboundAtendido).toHaveBeenCalledWith(id, EN_HORARIO);
+    }
   });
 
   it("un número que falla no impide atender al siguiente", async () => {

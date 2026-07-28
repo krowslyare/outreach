@@ -329,7 +329,15 @@ try {
     // llegó o quedó a medias mientras el proceso no estaba. Se corre una vez al
     // entrar y después cada pocos minutos; el intervalo es corto frente a la
     // hora a la que abre la ventana, así que apenas abre se despacha solo.
+    // Un barrido puede tardar más que su intervalo —20 chats por una llamada al
+    // LLM cada uno raspa los cinco minutos— y dos corriendo a la vez son dos
+    // respuestas al mismo prospecto. El candado por chat los pone en fila pero
+    // no evita el duplicado; eso lo resuelve releer los pendientes adentro del
+    // candado (ver atenderYSaldar). Esto además evita que se apilen.
+    let barriendo = false;
     const cobrarPendientes = async (): Promise<void> => {
+      if (barriendo) return;
+      barriendo = true;
       try {
         const resumen = await reintentarPendientes(depsConversacion());
         if (resumen.numeros > 0) {
@@ -340,6 +348,8 @@ try {
         }
       } catch (error) {
         console.error("[pendientes] falló el barrido:", error);
+      } finally {
+        barriendo = false;
       }
     };
     await cobrarPendientes();

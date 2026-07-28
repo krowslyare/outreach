@@ -141,21 +141,18 @@ export async function reintentarPendientes(
   limite = 20,
 ): Promise<ResumenReintentos> {
   const pendientes = deps.store.inboundsPendientes(limite);
-
-  const porNumero = new Map<string, string[]>();
-  for (const pendiente of pendientes) {
-    const ids = porNumero.get(pendiente.e164) ?? [];
-    ids.push(pendiente.waMessageId);
-    porNumero.set(pendiente.e164, ids);
-  }
+  // Solo los NÚMEROS distintos: los ids se releen dentro del candado, porque
+  // entre esta foto y el turno de cada chat pueden haber llegado más mensajes
+  // —o alguien más pudo haberlos atendido ya.
+  const numeros = [...new Set(pendientes.map((p) => p.e164))];
 
   let respondidos = 0;
   let siguenDiferidos = 0;
 
-  for (const [e164, ids] of porNumero) {
+  for (const e164 of numeros) {
     let resultado: ResultadoConversacion;
     try {
-      resultado = await atenderYSaldar(deps, e164, ids);
+      resultado = await atenderYSaldar(deps, e164);
     } catch (error) {
       // Un fallo con un prospecto no puede impedir que se atienda al siguiente,
       // y al no marcarse nada este número vuelve a salir en la próxima pasada.
@@ -167,7 +164,7 @@ export async function reintentarPendientes(
     else if (resultado.accion === "respondido") respondidos += 1;
   }
 
-  return { numeros: porNumero.size, respondidos, siguenDiferidos };
+  return { numeros: numeros.length, respondidos, siguenDiferidos };
 }
 
 /**
@@ -179,13 +176,33 @@ export async function reintentarPendientes(
 async function atenderYSaldar(
   deps: ConversacionDeps,
   e164: string,
-  ids: readonly string[],
 ): Promise<ResultadoConversacion> {
-  const resultado = await enSerie(e164, () => atender(deps, e164));
-  if (cerroElCiclo(resultado)) {
-    for (const id of ids) deps.store.marcarInboundAtendido(id, deps.now());
-  }
-  return resultado;
+  return enSerie(e164, async () => {
+    // Los pendientes se leen DENTRO del candado, no antes.
+    //
+    // Leerlos afuera abría dos formas de contestar dos veces. Un barrido que
+    // tarda más que su intervalo se solapa con el siguiente: los dos toman la
+    // misma foto, el candado solo los pone en fila, y el segundo manda una
+    // respuesta duplicada sobre algo que el primero ya atendió. Lo mismo entre
+    // un barrido y un mensaje en vivo del mismo número.
+    //
+    // Adentro del candado, quien llega segundo ve la lista vacía y se va. Un
+    // mensaje repetido es la señal más clara de que del otro lado hay un bot.
+    const pendientes = deps.store.inboundsPendientes(200, e164);
+    if (pendientes.length === 0) return { accion: "duplicado" } as const;
+
+    const resultado = await atender(deps, e164);
+    if (cerroElCiclo(resultado)) {
+      // Se saldan TODOS, no una muestra: `atender` compuso su respuesta con el
+      // historial completo, así que cubre todo lo que estaba pendiente en este
+      // momento. Marcar solo una parte hacía que el resto disparara otra
+      // respuesta después, ya contestada.
+      for (const p of pendientes) {
+        deps.store.marcarInboundAtendido(p.waMessageId, deps.now());
+      }
+    }
+    return resultado;
+  });
 }
 
 /**
@@ -235,15 +252,7 @@ export async function atenderNumero(
   deps: ConversacionDeps,
   e164: string,
 ): Promise<ResultadoConversacion> {
-  // Acotado por número en la consulta: con el límite global, 50 pendientes
-  // viejos de otros chats tapaban el mensaje que acaba de llegar.
-  const ids = deps.store
-    .inboundsPendientes(50, e164)
-    .map((pendiente) => pendiente.waMessageId);
-  if (ids.length === 0) {
-    return { accion: "duplicado" };
-  }
-  return atenderYSaldar(deps, e164, ids);
+  return atenderYSaldar(deps, e164);
 }
 
 async function resolver(

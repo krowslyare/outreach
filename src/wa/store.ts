@@ -252,7 +252,33 @@ export class Store {
     try {
       for (const prospect of scored) {
         // Un prospecto bloqueado por M2 no debe entrar silenciosamente a la cola.
-        if (!prospect.eligible) continue;
+        //
+        // Pero saltarlo del todo escondía un caso que sí importa: si Places
+        // ahora reporta una web que antes no reportaba, el prospecto pasa a
+        // NO elegible y con `continue` la fila vieja se quedaba tal cual, en la
+        // cola, con su estado anterior. O sea: la información nueva llegaba y se
+        // descartaba, y el bot le seguía escribiendo a un negocio del que ya
+        // sabemos que tiene web.
+        //
+        // No se crean filas nuevas para bloqueados; solo se corrigen las que ya
+        // existen.
+        if (!prospect.eligible) {
+          if (prospect.web.websiteUri !== null) {
+            for (const phone of prospect.phones) {
+              if (phone.kind !== "mobile" || phone.e164 === null) continue;
+              const existe = this.db
+                .prepare("select 1 as hay from recipients where e164 = ?")
+                .get(phone.e164) as { hay: number } | undefined;
+              if (existe === undefined) continue;
+              this.db
+                .prepare("update recipients set has_website = 1 where e164 = ?")
+                .run(phone.e164);
+              // Misma conexión, así que esto se une a la transacción abierta.
+              this.suppress(phone.e164, "harvest posterior: ahora tiene web");
+            }
+          }
+          continue;
+        }
         for (const phone of prospect.phones) {
           if (phone.kind !== "mobile" || phone.e164 === null) continue;
           insert.run(
@@ -776,27 +802,42 @@ export class Store {
   resolverWeb(e164: string, tieneWeb: boolean, delta: number): boolean {
     const fila = this.db
       .prepare(
-        `select has_website from recipients
+        `select source_id, has_website from recipients
          where e164 = ? and source_id not like 'inbound:%'`,
       )
-      .get(e164) as { has_website: number | null } | undefined;
+      .get(e164) as
+      | { source_id: string; has_website: number | null }
+      | undefined;
     if (fila === undefined || fila.has_website !== null) return false;
 
-    if (tieneWeb) {
-      this.db
-        .prepare("update recipients set has_website = 1 where e164 = ?")
-        .run(e164);
-      this.suppress(e164, "revisión manual: ya tiene web");
-      return true;
-    }
-
-    this.db
+    // La revisión es sobre el ESTABLECIMIENTO, no sobre un teléfono. Un mismo
+    // source_id puede tener varios móviles y por lo tanto varias filas; aplicar
+    // el resultado a una sola dejaba las demás contactables, así que el bot
+    // podía escribirle al mismo negocio por otro número después de que alguien
+    // ya hubiera verificado que tiene web.
+    const hermanos = this.db
       .prepare(
-        `update recipients
-         set has_website = 0, score = coalesce(score, 0) + ?
-         where e164 = ?`,
+        `select e164 from recipients
+         where source_id = ? and has_website is null`,
       )
-      .run(delta, e164);
+      .all(fila.source_id) as Array<{ e164: string }>;
+
+    for (const { e164: numero } of hermanos) {
+      if (tieneWeb) {
+        this.db
+          .prepare("update recipients set has_website = 1 where e164 = ?")
+          .run(numero);
+        this.suppress(numero, "revisión manual: ya tiene web");
+      } else {
+        this.db
+          .prepare(
+            `update recipients
+             set has_website = 0, score = coalesce(score, 0) + ?
+             where e164 = ?`,
+          )
+          .run(delta, numero);
+      }
+    }
     return true;
   }
 
@@ -956,6 +997,9 @@ export class Store {
          where r.suppressed = 0
            and r.human_takeover = 0
            and r.source_id not like 'inbound:%'
+           -- Defensa en profundidad: el producto ES la web. Quien ya tiene una
+           -- no se contacta aunque por algún camino haya quedado sin suprimir.
+           and coalesce(r.has_website, 0) = 0
            and not exists (
              select 1 from messages m
              where m.e164 = r.e164 and m.direction = 'in'

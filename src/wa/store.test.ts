@@ -662,9 +662,12 @@ describe("pendientes acotados y revisión que sobrevive al harvest", () => {
     ).toBe(68);
   });
 
-  // Pero un dato NUEVO sí gana: Places pasó a reportar web y eso es más
-  // reciente que la revisión.
-  it("un hallazgo nuevo de Places sí se impone sobre la revisión", () => {
+  // Un hallazgo NUEVO sí gana, y llega como NO elegible: scoreProspect le pone
+  // el bloqueo "ya tiene web". El primer intento de este test pasaba `eligible:
+  // true`, que es un estado que scoreProspect nunca produce — o sea probaba un
+  // escenario imposible mientras el real (importRecipients hace `continue` y
+  // descarta la información) quedaba sin cubrir.
+  it("un harvest que descubre web corrige y saca de la cola la fila vieja", () => {
     const store = new Store(":memory:", () => AHORA);
     stores.push(store);
     const base = scored("A", "+51999111222");
@@ -674,9 +677,61 @@ describe("pendientes acotados y revisión que sobrevive al harvest", () => {
     store.resolverWeb("+51999111222", false, 18);
 
     store.importRecipients([
-      { ...base, web: { ...base.web, websiteUri: "https://ejemplo.pe" } },
+      {
+        ...base,
+        eligible: false,
+        blockers: ["ya tiene web"],
+        web: { ...base.web, websiteUri: "https://ejemplo.pe" },
+      },
     ]);
 
     expect(store.loadFichaProspecto("+51999111222")!.tieneWeb).toBe(true);
+    expect(store.loadRecipientState("+51999111222").suppressed).toBe(true);
+    expect(store.candidatosParaContactar(10)).toEqual([]);
+  });
+
+  // Pero un bloqueado que NO tiene web tampoco debe crear filas nuevas.
+  it("un bloqueado sin web no entra a la cola", () => {
+    const store = new Store(":memory:", () => AHORA);
+    stores.push(store);
+    const base = scored("Z", "+51999888777");
+    store.importRecipients([
+      { ...base, eligible: false, blockers: ["match poco confiable"] },
+    ]);
+
+    expect(store.existeDestinatario("+51999888777")).toBe(false);
+  });
+});
+
+describe("la revisión es del establecimiento, no del teléfono", () => {
+  const stores: Store[] = [];
+  afterEach(() => {
+    for (const store of stores.splice(0)) store.close();
+  });
+
+  // Un mismo source_id con dos móviles crea dos filas. Aplicar la revisión a
+  // una sola dejaba la otra contactable: el bot le escribía al mismo negocio por
+  // el otro número, después de que alguien ya verificó que tiene web.
+  it("marcar 'tiene web' suprime todos los números del mismo negocio", () => {
+    const store = new Store(":memory:");
+    stores.push(store);
+    const base = scored("A", "+51999111222");
+    store.importRecipients([
+      {
+        ...base,
+        phones: [
+          { raw: "999111222", e164: "+51999111222", kind: "mobile" },
+          { raw: "988222333", e164: "+51988222333", kind: "mobile" },
+        ],
+        web: { ...base.web, websiteUri: null, verificadoSinWeb: false },
+      },
+    ]);
+
+    expect(store.resolverWeb("+51999111222", true, 18)).toBe(true);
+
+    expect(store.loadRecipientState("+51999111222").suppressed).toBe(true);
+    expect(store.loadRecipientState("+51988222333").suppressed).toBe(true);
+    expect(store.candidatosParaContactar(10)).toEqual([]);
+    expect(store.paraRevisar(10)).toEqual([]);
   });
 });
