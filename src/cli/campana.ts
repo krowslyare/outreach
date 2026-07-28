@@ -5,7 +5,7 @@
 
 import "./env.js";
 
-import { crearProveedor } from "../llm/index.js";
+import { crearProveedor, modeloAnunciado } from "../llm/index.js";
 import { ejecutarTanda } from "../sequence/campaign.js";
 import { createWaClient, type WaClient } from "../wa/client.js";
 import { enSerie } from "../orquestador/cola.js";
@@ -115,10 +115,18 @@ function delay(milliseconds: number): Promise<void> {
 }
 
 const argumentos = parseArgs(process.argv.slice(2));
-const proveedor = crearProveedor();
+// Dos proveedores porque son dos trabajos distintos: componer el mensaje en
+// frío —donde la calidad es lo que evita que te bloqueen— y conversar, donde
+// pesa más seguir las reglas duras. Ver src/llm/index.ts.
+const proveedorCompositor = crearProveedor("compositor");
+const proveedorAgente = crearProveedor("agente");
 // Se anuncia antes de iniciar WhatsApp o componer mensajes para que el
 // operador pueda detener una ejecución apuntada al proveedor equivocado.
-console.info(`Proveedor LLM: ${proveedor.nombre}`);
+console.info(
+  `Proveedor LLM: ${proveedorCompositor.nombre}` +
+    ` — compositor: ${modeloAnunciado("compositor")}` +
+    ` · agente: ${modeloAnunciado("agente")}`,
+);
 const store = new Store();
 // Número al que se escala. Sin esto el handoff no tiene a quién avisar, así que
 // se exige explícitamente en vez de fallar recién cuando alguien esté caliente.
@@ -213,7 +221,7 @@ try {
         manejarInbound(
         {
           store,
-          proveedor,
+          proveedor: proveedorAgente,
           enviar: (destino, texto) => waActivo.sendText(destino, texto),
           handoff: { numeroHumano },
           config,
@@ -241,7 +249,7 @@ try {
     : await ejecutarTanda(
         {
           store,
-          proveedor,
+          proveedor: proveedorCompositor,
           client,
           config,
           now: () => new Date(),

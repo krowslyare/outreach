@@ -18,6 +18,21 @@ import {
 const TIMEOUT_DEFAULT_MS = 120_000;
 const MODELO_DEFAULT = "gpt-5.4";
 
+/**
+ * El puerto define cinco niveles y el CLI de Codex acepta cuatro. Los dos de
+ * arriba colapsan a "high" en vez de pasarse tal cual: un valor que el CLI no
+ * conoce lo hace terminar con código distinto de cero, y eso el agente lo
+ * traduce a "el proveedor falló" y escala la conversación. Degradar es mejor
+ * que romper.
+ */
+const ESFUERZO_CODEX: Record<string, string> = {
+  low: "low",
+  medium: "medium",
+  high: "high",
+  xhigh: "high",
+  max: "high",
+};
+
 export interface CodexOpts {
   modelo?: string;
   timeoutMs?: number;
@@ -53,6 +68,11 @@ export function proveedorCodex(opts: CodexOpts = {}): ProveedorLLM {
             "exec",
             "-m",
             modelo,
+            // El esfuerzo venía en la solicitud y este adaptador lo tiraba: todo
+            // corría en el default del CLI, así que pedir "medium" para
+            // conversar o "high" para componer no cambiaba nada.
+            "-c",
+            `model_reasoning_effort=${ESFUERZO_CODEX[solicitud.esfuerzo ?? "medium"] ?? "medium"}`,
             "--sandbox",
             "read-only",
             "--skip-git-repo-check",
