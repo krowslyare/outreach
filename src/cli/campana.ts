@@ -261,6 +261,11 @@ try {
       // propios envíos recientes parecieran escritos a mano — y el falso
       // positivo mata la conversación con ese prospecto para siempre.
       if (store.esMensajeNuestro(waMessageId)) return;
+      // Escribirle a alguien que no es de la campaña es lo normal: es tu
+      // teléfono. loadRecipientState LANZA para un desconocido y esto corre sin
+      // await, así que sin esta guarda la excepción terminaba como unhandled
+      // rejection y se llevaba el proceso entero.
+      if (!store.existeDestinatario(e164)) return;
       const estado = store.loadRecipientState(e164);
       if (estado.humanTakeover) return;
       store.setHumanTakeover(e164);

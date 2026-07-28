@@ -87,15 +87,37 @@ describe("crearAgrupador", () => {
     expect(agrupador.pendientes()).toBe(0);
   });
 
-  // Si la tarea revienta, quien esperaba ese turno no puede quedar colgado.
-  it("una tarea que falla igual libera a quien esperaba", async () => {
+  // El fallo tiene que LLEGAR a quien esperaba. Si se lo tragara, el .catch de
+  // campana.ts nunca correría y el rechazo quedaría sin manejar — con eso Node
+  // tumba el proceso y se lleva el listener por un fallo pasajero.
+  it("un fallo de la tarea viaja a quien esperaba", async () => {
     const agrupador = crearAgrupador(60_000);
 
     const espera = agrupador.programar("+51999111222", async () => {
       throw new Error("revienta");
     });
+    const capturado = espera.catch((error: unknown) => error);
     await agrupador.vaciar();
 
-    await expect(espera).resolves.toBeUndefined();
+    await expect(capturado).resolves.toMatchObject({ message: "revienta" });
+  });
+
+  // vaciar() no puede propagar el fallo de un chat y dejar sin disparar a los
+  // demás: se apaga con varios pendientes y todos tienen que correr.
+  it("vaciar no se detiene porque una tarea falle", async () => {
+    const corridas: string[] = [];
+    const agrupador = crearAgrupador(60_000);
+
+    const malo = agrupador.programar("+51999111222", async () => {
+      throw new Error("revienta");
+    });
+    malo.catch(() => undefined);
+    const bueno = agrupador.programar("+51999333444", async () => {
+      corridas.push("ok");
+    });
+
+    await expect(agrupador.vaciar()).resolves.toBeUndefined();
+    await bueno;
+    expect(corridas).toEqual(["ok"]);
   });
 });

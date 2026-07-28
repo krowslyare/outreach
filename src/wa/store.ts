@@ -231,8 +231,19 @@ export class Store {
         name = excluded.name,
         district = excluded.district,
         classification = excluded.classification,
-        score = excluded.score,
-        has_website = excluded.has_website,
+        -- Un harvest posterior NO pisa lo que se resolvió a mano. Places sigue
+        -- devolviendo "no sé" para estos prospectos, así que sin esto una
+        -- reimportación los devolvía a la cola de revisión y borraba el ajuste
+        -- de score: el trabajo manual se perdía sin que nada lo indicara.
+        --
+        -- Un dato NUEVO sí gana: si Places pasa a reportar web, esa información
+        -- es más reciente que la revisión y debe imponerse.
+        score = case
+          when recipients.has_website is not null and excluded.has_website is null
+            then recipients.score
+          else excluded.score
+        end,
+        has_website = coalesce(excluded.has_website, recipients.has_website),
         review_count = excluded.review_count
     `);
     const createdAt = this.clock().toISOString();
@@ -663,11 +674,19 @@ export class Store {
    * Solo humanos: un autorespondedor se registra sin `handled_at` y no hay nada
    * que contestarle.
    */
-  inboundsPendientes(limite: number): Array<{
+  inboundsPendientes(
+    limite: number,
+    e164?: string,
+  ): Array<{
     e164: string;
     waMessageId: string;
     at: Date;
   }> {
+    // El filtro por número va en el SQL y no después, en memoria. Filtrando
+    // fuera, con 50 pendientes viejos de OTROS chats el límite global dejaba
+    // afuera el mensaje recién llegado: atenderNumero no encontraba nada,
+    // devolvía "duplicado" y el prospecto en vivo se quedaba sin respuesta
+    // hasta el siguiente barrido.
     const filas = this.db
       .prepare(
         `select m.e164, m.wa_message_id, m.created_at
@@ -680,10 +699,11 @@ export class Store {
            and r.suppressed = 0
            and r.human_takeover = 0
            and r.source_id not like 'inbound:%'
+           and (? is null or m.e164 = ?)
          order by m.created_at asc
          limit ?`,
       )
-      .all(limite) as Array<{
+      .all(e164 ?? null, e164 ?? null, limite) as Array<{
       e164: string;
       wa_message_id: string;
       created_at: string;
@@ -778,6 +798,22 @@ export class Store {
       )
       .run(delta, e164);
     return true;
+  }
+
+  /**
+   * ¿Este número existe como destinatario?
+   *
+   * Existe porque `loadRecipientState` LANZA para un desconocido, y hay un
+   * llamador —la detección de envíos manuales— donde eso no es un error sino lo
+   * normal: el dueño le escribe a cualquiera desde su teléfono vinculado. Ahí la
+   * excepción viajaba por un `void` sin await y terminaba como unhandled
+   * rejection, o sea el proceso caído y el listener con él.
+   */
+  existeDestinatario(e164: string): boolean {
+    const fila = this.db
+      .prepare("select 1 as hay from recipients where e164 = ?")
+      .get(e164) as { hay: number } | undefined;
+    return fila !== undefined;
   }
 
   /**

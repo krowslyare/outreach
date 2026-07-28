@@ -16,6 +16,7 @@ interface Pendiente {
   timer: ReturnType<typeof setTimeout>;
   tarea: () => Promise<void>;
   resolver: () => void;
+  rechazar: (error: unknown) => void;
   hecho: Promise<void>;
 }
 
@@ -41,11 +42,15 @@ export function crearAgrupador(esperaMs = ESPERA_RAFAGA_MS): Agrupador {
     if (entrada === undefined) return Promise.resolve();
     pendientes.delete(clave);
     clearTimeout(entrada.timer);
-    // El resolver corre pase lo que pase: si la tarea revienta, quien esperaba
-    // este turno no puede quedar colgado para siempre.
-    return entrada.tarea().finally(() => {
-      entrada.resolver();
-    });
+    // El fallo VIAJA a quien esperaba. Antes esto era un `finally` que resolvía
+    // siempre, con dos consecuencias: el `.catch` de campana.ts nunca corría, y
+    // el rechazo de `tarea()` quedaba sin manejar —el timer descarta el
+    // resultado con `void`— así que Node podía tumbar el proceso entero por un
+    // fallo pasajero atendiendo un mensaje. El listener se caía con él.
+    //
+    // Lo que devuelve `disparar` no rechaza nunca (then con ambos handlers),
+    // que es lo que hace seguro descartarlo en el timer y en vaciar().
+    return entrada.tarea().then(entrada.resolver, entrada.rechazar);
   }
 
   function programar(clave: string, tarea: () => Promise<void>): Promise<void> {
@@ -63,13 +68,17 @@ export function crearAgrupador(esperaMs = ESPERA_RAFAGA_MS): Agrupador {
     }
 
     let resolver!: () => void;
-    const hecho = new Promise<void>((resolve) => {
+    let rechazar!: (error: unknown) => void;
+    // Quien llama a programar() TIENE que manejar el rechazo: la promesa es
+    // compartida por toda la ráfaga y un rechazo sin catch termina el proceso.
+    const hecho = new Promise<void>((resolve, reject) => {
       resolver = resolve;
+      rechazar = reject;
     });
     const timer = setTimeout(() => void disparar(clave), esperaMs);
     // Un timer de espera no debe ser la razón por la que el proceso sigue vivo.
     timer.unref?.();
-    pendientes.set(clave, { timer, tarea, resolver, hecho });
+    pendientes.set(clave, { timer, tarea, resolver, rechazar, hecho });
     return hecho;
   }
 

@@ -423,6 +423,56 @@ describe("manejarInbound", () => {
   });
 });
 
+describe("las puertas cubren también el handoff", () => {
+  const FUERA_DE_HORARIO = new Date("2026-07-28T04:00:00.000Z"); // 23:00 en Lima
+
+  // REGRESIÓN: el handoff pasó a mandarle un acuse al prospecto, y el bloque de
+  // escalamiento corría ANTES de las puertas. Con eso, un "me interesa" a las
+  // 3am producía un mensaje automático a las 3am.
+  it("un escalamiento fuera de horario no envía nada", async () => {
+    const { deps, enviar, store } = crearDobles({
+      now: FUERA_DE_HORARIO,
+      respuesta: {
+        corte: "fin",
+        texto: "",
+        herramienta: {
+          nombre: "escalar_a_humano",
+          input: { motivo: "quiere_contratar", resumen: "Quiere contratar." },
+        },
+      },
+    });
+
+    await expect(
+      manejarInbound(deps, eventoInbound("Me interesa")),
+    ).resolves.toMatchObject({ accion: "diferido" });
+
+    expect(enviar).not.toHaveBeenCalled();
+    // Sin lock: la conversación no se tomó, así que al abrir la ventana el
+    // barrido puede volver a decidir y esta vez sí escalar.
+    expect(store.setHumanTakeover).not.toHaveBeenCalled();
+    // Sin marcar: la deuda tiene que seguir viva.
+    expect(store.marcarInboundAtendido).not.toHaveBeenCalled();
+  });
+
+  // Con el kill switch activo eran DOS envíos desde una cuenta que hay que
+  // dejar quieta: el aviso al humano y el acuse al prospecto.
+  it("con el kill switch activo no envía ni escala", async () => {
+    const { deps, enviar, generar } = crearDobles({
+      salud: {
+        killSwitch: { tripped: true, reason: "caída de entrega", trippedAt: EN_HORARIO },
+      },
+    });
+
+    await expect(
+      manejarInbound(deps, eventoInbound("Me interesa")),
+    ).resolves.toMatchObject({ accion: "diferido" });
+
+    expect(enviar).not.toHaveBeenCalled();
+    // Tampoco se gasta una llamada al LLM cuyo resultado no se podría usar.
+    expect(generar).not.toHaveBeenCalled();
+  });
+});
+
 describe("reintentarPendientes", () => {
   const FUERA_DE_HORARIO = new Date("2026-07-28T04:00:00.000Z"); // 23:00 en Lima
 

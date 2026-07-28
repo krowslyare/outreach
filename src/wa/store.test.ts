@@ -585,3 +585,98 @@ describe("revisión manual del tramo sin verificar", () => {
     expect(store.resolverWeb("+51900000000", false, 18)).toBe(false);
   });
 });
+
+describe("existeDestinatario", () => {
+  const stores: Store[] = [];
+  afterEach(() => {
+    for (const store of stores.splice(0)) store.close();
+  });
+
+  // loadRecipientState lanza para un desconocido, y la detección de envíos
+  // manuales corre sin await: esa excepción se llevaba el proceso entero.
+  it("responde sin lanzar para un número que no está", () => {
+    const store = new Store(":memory:");
+    stores.push(store);
+    store.importRecipients([scored("A", "+51999111222")]);
+
+    expect(store.existeDestinatario("+51999111222")).toBe(true);
+    expect(store.existeDestinatario("+51900000000")).toBe(false);
+    expect(() => store.loadRecipientState("+51900000000")).toThrow();
+  });
+});
+
+describe("pendientes acotados y revisión que sobrevive al harvest", () => {
+  const stores: Store[] = [];
+  afterEach(() => {
+    for (const store of stores.splice(0)) store.close();
+  });
+
+  const AHORA = new Date("2026-07-28T15:00:00.000Z");
+
+  // Con el límite global, 50 pendientes viejos de otros chats tapaban el
+  // mensaje recién llegado: el prospecto en vivo se quedaba sin respuesta.
+  it("acota los pendientes al número pedido, no filtrando después", () => {
+    const store = new Store(":memory:", () => AHORA);
+    stores.push(store);
+    store.importRecipients(
+      Array.from({ length: 4 }, (_, i) =>
+        scored(`S${i}`, `+5199900000${i}`),
+      ),
+    );
+    for (let i = 0; i < 4; i += 1) {
+      store.recordInbound(`+5199900000${i}`, "hola", AHORA, {
+        waMessageId: `wa-${i}`,
+        clase: "humano",
+      });
+    }
+
+    // Límite 1: sin acotar en SQL, solo saldría el más viejo (wa-0).
+    expect(store.inboundsPendientes(1, "+51999000003")).toEqual([
+      { e164: "+51999000003", waMessageId: "wa-3", at: AHORA },
+    ]);
+    // Sin número sigue siendo global.
+    expect(store.inboundsPendientes(1)[0]?.waMessageId).toBe("wa-0");
+  });
+
+  // El trabajo manual de revisar 55 prospectos no puede perderse porque alguien
+  // vuelva a correr el harvest.
+  it("una reimportación no pisa lo que se resolvió a mano", () => {
+    const store = new Store(":memory:", () => AHORA);
+    stores.push(store);
+    const base = scored("A", "+51999111222");
+    const sinVerificar = {
+      ...base,
+      score: 50,
+      web: { ...base.web, websiteUri: null, verificadoSinWeb: false },
+    };
+    store.importRecipients([sinVerificar]);
+    store.resolverWeb("+51999111222", false, 18);
+
+    store.importRecipients([sinVerificar]);
+
+    expect(store.loadFichaProspecto("+51999111222")!.tieneWeb).toBe(false);
+    expect(store.paraRevisar(10)).toEqual([]);
+    expect(
+      store.candidatosParaContactar(10).find((c) => c.e164 === "+51999111222")
+        ?.score,
+    ).toBe(68);
+  });
+
+  // Pero un dato NUEVO sí gana: Places pasó a reportar web y eso es más
+  // reciente que la revisión.
+  it("un hallazgo nuevo de Places sí se impone sobre la revisión", () => {
+    const store = new Store(":memory:", () => AHORA);
+    stores.push(store);
+    const base = scored("A", "+51999111222");
+    store.importRecipients([
+      { ...base, web: { ...base.web, websiteUri: null, verificadoSinWeb: false } },
+    ]);
+    store.resolverWeb("+51999111222", false, 18);
+
+    store.importRecipients([
+      { ...base, web: { ...base.web, websiteUri: "https://ejemplo.pe" } },
+    ]);
+
+    expect(store.loadFichaProspecto("+51999111222")!.tieneWeb).toBe(true);
+  });
+});

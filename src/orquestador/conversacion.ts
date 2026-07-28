@@ -235,9 +235,10 @@ export async function atenderNumero(
   deps: ConversacionDeps,
   e164: string,
 ): Promise<ResultadoConversacion> {
+  // Acotado por número en la consulta: con el límite global, 50 pendientes
+  // viejos de otros chats tapaban el mensaje que acaba de llegar.
   const ids = deps.store
-    .inboundsPendientes(50)
-    .filter((pendiente) => pendiente.e164 === e164)
+    .inboundsPendientes(50, e164)
     .map((pendiente) => pendiente.waMessageId);
   if (ids.length === 0) {
     return { accion: "duplicado" };
@@ -294,7 +295,26 @@ async function atender(
     return { accion: "ignorado", razon: "destinatario suprimido" };
   }
 
-  // 4. El agente decide.
+  // 4. Las puertas, ANTES de llamar al agente.
+  //
+  // Estaban después, cubriendo solo la respuesta libre. Eso alcanzaba mientras
+  // un escalamiento no producía ningún saliente hacia el prospecto — pero ahora
+  // el handoff le manda el acuse con las tres opciones, así que un "me interesa"
+  // a las 3am generaba un mensaje automático a las 3am, que es exactamente lo
+  // que la ventana horaria existe para evitar. Con el kill switch activo era
+  // peor: dos envíos desde una cuenta que hay que dejar quieta.
+  //
+  // Moverlas acá arriba las vuelve absolutas de verdad, como dice su propio
+  // comentario, y de paso no se gasta una llamada al LLM cuyo resultado no se
+  // podría usar. El entrante queda sin marcar, así que el barrido lo reintenta
+  // al abrir la ventana y ahí sí escala, avisa y responde — todo en horario.
+  const puerta = puedeResponder(deps, deps.now());
+  if (!puerta.ok) {
+    deps.log?.(`respuesta a ${e164} diferida: ${puerta.razon}`);
+    return { accion: "diferido", razon: puerta.razon };
+  }
+
+  // 5. El agente decide.
   const historial: Turno[] = deps.store.loadConversacion(e164).map((m) => ({
     rol: m.direction === "in" ? "prospecto" : "nosotros",
     texto: m.body,
@@ -304,7 +324,7 @@ async function atender(
   // del prospecto — que es justo lo que decidirRespuesta exige.
   const decision = await decidirRespuesta(deps.proveedor, ficha, historial);
 
-  // 5. Escalar y perder van al handoff, que pone el lock antes de nada.
+  // 6. Escalar y perder van al handoff, que pone el lock antes de nada.
   if (decision.kind !== "responder") {
     const resultado = await ejecutarHandoff(
       { ...deps.handoff, store: deps.store, enviar: deps.enviar, now: deps.now },
@@ -318,14 +338,7 @@ async function atender(
       : { accion: "perdido", motivo: decision.motivo };
   }
 
-  // 6. Responder, si las puertas lo permiten.
-  const ahora = deps.now();
-  const puerta = puedeResponder(deps, ahora);
-  if (!puerta.ok) {
-    deps.log?.(`respuesta a ${e164} diferida: ${puerta.razon}`);
-    return { accion: "diferido", razon: puerta.razon };
-  }
-
+  // 7. Responder.
   const waMessageId = await deps.enviar(e164, decision.texto);
   deps.store.recordOutboundLibre(e164, decision.texto, waMessageId, deps.now());
   return { accion: "respondido", texto: decision.texto };
