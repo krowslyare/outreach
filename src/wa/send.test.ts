@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 
+import { dailyCap } from "./safety.js";
 import type { SendDependencies } from "./send.js";
 import { attemptSend } from "./send.js";
 import {
@@ -260,19 +261,23 @@ describe("attemptSend", () => {
   });
 
   it("serializa intentos concurrentes para no superar el tope diario", async () => {
-    const dailyLimit = 3;
+    // Se lee de la escalera en vez de fijarlo: este test prueba que la cola
+    // serializa, no cuánto vale el escalón. Con el número a mano, cambiar el
+    // ramp lo rompía sin que hubiera ninguna regresión real.
+    const dailyLimit = dailyCap(1, true);
     const { deps, sentCount } = concurrentDeps({
       dayIndex: 1,
       minGapSeconds: 0,
     });
 
-    // Los destinatarios distintos evitan que la idempotencia esconda la carrera:
-    // la única protección que debe limitar estos diez intentos es la cola.
+    // Destinatarios distintos para que la idempotencia no esconda la carrera:
+    // la única protección que debe limitar estos intentos es la cola. Se lanzan
+    // más que el tope, o si no la prueba pasaría trivialmente.
     const results = await Promise.all(
-      Array.from({ length: 10 }, (_, index) =>
+      Array.from({ length: dailyLimit + 5 }, (_, index) =>
         attemptSend(
           deps,
-          `+5190000000${index}`,
+          `+519${String(index).padStart(8, "0")}`,
           `Hola ${index}`,
           "first",
         ),
