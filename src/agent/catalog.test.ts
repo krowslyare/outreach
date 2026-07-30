@@ -1,6 +1,11 @@
 import { describe, expect, it } from "vitest";
 
-import { catalogoParaPrompt, PLANES } from "./catalog.js";
+import {
+  catalogoParaPrompt,
+  MODULOS_ACTIVABLES,
+  PLANES,
+  PRICING_VERIFICADO_EN,
+} from "./catalog.js";
 
 describe("catálogo de planes", () => {
   it("conserva exactamente los códigos y precios vigentes", () => {
@@ -29,6 +34,24 @@ describe("catálogo de planes", () => {
       // Se revisan ambas cadenas porque el prompt es el contrato visible del agente.
       expect(catalogo).toContain(plan.nombre);
       expect(catalogo).toContain(plan.precio);
+      expect(catalogo).toContain(plan.portal);
     }
+  });
+
+  it("incluye los módulos activables y deja claro que no vienen por defecto", () => {
+    const catalogo = catalogoParaPrompt();
+
+    expect(catalogo).toContain(
+      "Módulos activables — no están incluidos por defecto",
+    );
+    for (const modulo of MODULOS_ACTIVABLES) {
+      expect(catalogo).toContain(modulo.nombre);
+      expect(catalogo).toContain(modulo.precio);
+      expect(catalogo).toContain(modulo.implementacion);
+    }
+  });
+
+  it("registra la fecha de la última verificación comercial", () => {
+    expect(PRICING_VERIFICADO_EN).toBe("2026-07-30");
   });
 });
