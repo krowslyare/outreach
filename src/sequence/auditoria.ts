@@ -1,6 +1,7 @@
 export interface ContextoAuditoria {
   clasificacion: string;
   aperturasRecientes: string[];
+  paso?: "first" | "fu1" | "fu2";
 }
 
 export type ResultadoAuditoria =
@@ -8,6 +9,21 @@ export type ResultadoAuditoria =
   | { ok: false; motivos: string[] };
 
 const SIGLAS_PERMITIDAS = new Set(["SAC", "EIRL", "SRL", "SA", "DNI", "RUC"]);
+const TAXONOMIAS_CRUDAS = new Set([
+  "CONSULTORIOS MEDICOS Y DE OTROS PROFESIONALES DE LA SALUD",
+  "CENTRO ODONTOLOGICO",
+  "POLICLINICOS",
+  "PATOLOGIA CLINICA",
+  "DIAGNOSTICO POR IMAGENES",
+  "CENTROS DE SALUD O CENTROS MEDICOS",
+]);
+
+function sinAcentos(value: string): string {
+  return value
+    .normalize("NFD")
+    .replace(/\p{M}/gu, "")
+    .toLocaleUpperCase("es-PE");
+}
 
 function primerasCincoPalabras(texto: string): string | null {
   const normalizadas =
@@ -28,10 +44,11 @@ export function auditarMensaje(
   const motivos: string[] = [];
   const textoMinuscula = texto.toLocaleLowerCase("es-PE");
   const clasificacionCruda = contexto.clasificacion.trim();
+  const clasificacionNormalizada = sinAcentos(clasificacionCruda);
   const contieneTaxonomia =
     textoMinuscula.includes("y de otros profesionales") ||
     textoMinuscula.includes("profesionales de la salud") ||
-    (clasificacionCruda.length > 0 &&
+    (TAXONOMIAS_CRUDAS.has(clasificacionNormalizada) &&
       textoMinuscula.includes(clasificacionCruda.toLocaleLowerCase("es-PE")));
 
   if (contieneTaxonomia) {
@@ -67,6 +84,15 @@ export function auditarMensaje(
 
   if (texto.length > 700) {
     motivos.push(`supera el máximo de 700 caracteres (${texto.length})`);
+  }
+
+  if (contexto.paso === "first") {
+    const preguntas = texto.match(/\?/gu)?.length ?? 0;
+    if (preguntas !== 1) {
+      motivos.push(`el primer contacto debe tener una sola pregunta (${preguntas})`);
+    } else if (!texto.trimEnd().endsWith("?")) {
+      motivos.push("la pregunta del primer contacto debe ir al final");
+    }
   }
 
   const apertura = primerasCincoPalabras(texto);

@@ -46,7 +46,7 @@ function recipient(
 function texto(text: string): RespuestaLLM {
   return {
     corte: "fin",
-    texto: text,
+    texto: text.endsWith("?") ? text : `${text}?`,
     herramienta: null,
   };
 }
@@ -195,7 +195,7 @@ describe("ejecutarTanda", () => {
     expect(resumen.enviados).toBe(1);
     expect(generar).toHaveBeenCalledTimes(1);
     expect(sendText).toHaveBeenCalledOnce();
-    expect(sendText).toHaveBeenCalledWith(second, "Mensaje compuesto");
+    expect(sendText).toHaveBeenCalledWith(second, "Mensaje compuesto?");
   });
 
   it("deriva el paso distinguiendo 'nada enviado' de 'solo el primero'", async () => {
@@ -257,7 +257,7 @@ describe("ejecutarTanda", () => {
     expect(sendText).toHaveBeenCalledOnce();
     expect(sendText).toHaveBeenCalledWith(
       "+51900000002",
-      "Segundo sí compuesto",
+      "Segundo sí compuesto?",
     );
   });
 
@@ -273,9 +273,30 @@ describe("ejecutarTanda", () => {
         e164: "+51900000001",
         nombre: "Clínica +51900000001",
         paso: "first",
-        texto: "Mensaje compuesto",
+        texto: "Mensaje compuesto?",
       },
     ]);
+  });
+
+  it("recompone con otra apertura cuando la auditoría detecta repetición", async () => {
+    const repetido = "Le escribo de Kurogrid. Tenemos una propuesta concreta.";
+    const { deps, generar } = fakeDeps({
+      e164s: ["+51900000001", "+51900000002"],
+      respuestas: [
+        texto(repetido),
+        texto(repetido),
+        texto("Buscando la clínica, pensé en una web propia para sus pacientes"),
+      ],
+    });
+
+    const resumen = await ejecutarTanda(deps, { max: 2, dryRun: true });
+
+    expect(generar).toHaveBeenCalledTimes(3);
+    expect(resumen.fallosComposicion).toBe(0);
+    expect(resumen.mensajesCompuestos).toHaveLength(2);
+    expect(resumen.mensajesCompuestos[1]?.texto).toBe(
+      "Buscando la clínica, pensé en una web propia para sus pacientes?",
+    );
   });
 
   it("no compone antes de verificar ambas puertas", async () => {
@@ -312,6 +333,17 @@ describe("ejecutarTanda", () => {
     // Alcanzar el tope de la tanda es un motivo distinto a quedarse sin
     // prospectos, y conviene poder distinguirlos al leer el resumen.
     expect(resumen.motivoTerminacion).toBe("alcanzado el máximo de la tanda (2)");
+  });
+
+  it("pasa la vertical al store para aislar la cohorte", async () => {
+    const { deps } = fakeDeps();
+    const original = deps.store.candidatosParaContactar;
+    const candidatos = vi.fn(original);
+    deps.store.candidatosParaContactar = candidatos;
+
+    await ejecutarTanda(deps, { max: 1, dryRun: true, vertical: "dental" });
+
+    expect(candidatos).toHaveBeenCalledWith(100, 0, "dental");
   });
 });
 
