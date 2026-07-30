@@ -6,6 +6,7 @@
 import "./env.js";
 
 import { crearProveedor, modeloAnunciado } from "../llm/index.js";
+import { esVerticalId, type VerticalId } from "../prospects/verticals.js";
 import { ejecutarTanda } from "../sequence/campaign.js";
 import { createWaClient, type WaClient } from "../wa/client.js";
 import {
@@ -17,7 +18,10 @@ import {
 import { crearAgrupador } from "../orquestador/rafaga.js";
 import { hardKill } from "../wa/safety.js";
 import { Store } from "../wa/store.js";
-import { DEFAULT_SAFETY_CONFIG } from "../wa/types.js";
+import {
+  DEFAULT_SAFETY_CONFIG,
+  type SafetyConfig,
+} from "../wa/types.js";
 
 interface Argumentos {
   max?: number;
@@ -25,6 +29,7 @@ interface Argumentos {
   solo?: string;
   escuchar: boolean;
   sinTanda: boolean;
+  vertical?: VerticalId;
 }
 
 function parseArgs(args: readonly string[]): Argumentos {
@@ -33,6 +38,7 @@ function parseArgs(args: readonly string[]): Argumentos {
   let solo: string | undefined;
   let escuchar = false;
   let sinTanda = false;
+  let vertical: VerticalId | undefined;
 
   for (let indice = 0; indice < args.length; indice += 1) {
     const argumento = args[indice]!;
@@ -48,6 +54,21 @@ function parseArgs(args: readonly string[]): Argumentos {
       // Implica escuchar: un proceso que ni envía ni escucha no hace nada.
       sinTanda = true;
       escuchar = true;
+      continue;
+    }
+
+    const verticalInline = argumento.startsWith("--vertical=")
+      ? argumento.slice("--vertical=".length)
+      : undefined;
+    if (argumento === "--vertical" || verticalInline !== undefined) {
+      const raw = verticalInline ?? args[indice + 1];
+      if (verticalInline === undefined) indice += 1;
+      if (raw === undefined || !esVerticalId(raw)) {
+        throw new Error(
+          "--vertical requiere uno de: dental, veterinary, aesthetics, health, education, legal, hospitality",
+        );
+      }
+      vertical = raw;
       continue;
     }
 
@@ -92,7 +113,7 @@ function parseArgs(args: readonly string[]): Argumentos {
     );
   }
 
-  return { max, dryRun, solo, escuchar, sinTanda };
+  return { max, dryRun, solo, escuchar, sinTanda, vertical };
 }
 
 /**
@@ -119,6 +140,25 @@ function delay(milliseconds: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, milliseconds));
 }
 
+/**
+ * libsignal 2.0 imprime `SessionEntry` completo al cerrar una sesión de cifrado,
+ * incluyendo claves privadas efímeras. No es un log útil para operar el bot y
+ * termina dejando material criptográfico en terminales y recolectores de logs.
+ *
+ * Se filtra solo esa firma exacta y se devuelve un restaurador para no dejar
+ * `console.info` alterado después de cerrar WhatsApp.
+ */
+function ocultarLogsSensiblesLibsignal(): () => void {
+  const original = console.info;
+  console.info = (...args: unknown[]): void => {
+    if (args[0] === "Closing session:") return;
+    original(...args);
+  };
+  return () => {
+    console.info = original;
+  };
+}
+
 const argumentos = parseArgs(process.argv.slice(2));
 // Dos proveedores porque son dos trabajos distintos: componer el mensaje en
 // frío —donde la calidad es lo que evita que te bloqueen— y conversar, donde
@@ -139,9 +179,10 @@ const agrupador = crearAgrupador();
 // se exige explícitamente en vez de fallar recién cuando alguien esté caliente.
 const numeroHumano = process.env.NUMERO_HUMANO?.trim();
 let wa: WaClient | null = null;
+let restaurarConsoleInfo: (() => void) | null = null;
 // Se define recién cuando hay sesión de WhatsApp: sin cliente no hay a quién
 // responderle, y un dry-run no debe poder llamar al agente por accidente.
-let depsConversacion: () => ConversacionDeps = () => {
+let depsConversacion: (configConversacion?: SafetyConfig) => ConversacionDeps = () => {
   throw new Error("no hay sesión de WhatsApp: no se puede atender inbound");
 };
 
@@ -217,15 +258,16 @@ try {
 
     wa = createWaClient();
     const waActivo = wa;
+    restaurarConsoleInfo = ocultarLogsSensiblesLibsignal();
     // Una sola definición para los dos caminos que llaman al agente —el
     // entrante en vivo y el barrido de pendientes— porque si divergen, uno de
     // los dos corre con otras puertas de seguridad y nadie lo nota.
-    depsConversacion = () => ({
+    depsConversacion = (configConversacion = config) => ({
       store,
       proveedor: proveedorAgente,
       enviar: (destino: string, texto: string) => waActivo.sendText(destino, texto),
       handoff: { numeroHumano },
-      config,
+      config: configConversacion,
       now: () => new Date(),
       log: (mensaje: string) => console.log(`[inbound] ${mensaje}`),
     });
@@ -238,7 +280,17 @@ try {
       // ejecuta el handoff. Con el de bajo nivel, un prospecto que responde
       // durante la tanda queda registrado y sin respuesta — y si quería
       // contratar, sin escalar.
-      const deps = depsConversacion();
+      //
+      // El horario relajado de una prueba SOLO pertenece al número indicado en
+      // --solo. El socket también oye a todos los contactos históricos; usar
+      // `config` sin distinguirlos haría que un prospecto real que escriba a
+      // las 5am reciba respuesta automática porque casualmente había una prueba
+      // corriendo contra otro teléfono.
+      const configInbound =
+        esPrueba && evento.e164 === argumentos.solo
+          ? config
+          : DEFAULT_SAFETY_CONFIG;
+      const deps = depsConversacion(configInbound);
       // El registro es inmediato —opt-out e idempotencia no pueden esperar— y
       // solo la RESPUESTA se agrupa. Sin esto, tres mensajes seguidos del mismo
       // prospecto producían tres respuestas encadenadas: correctas y en orden,
@@ -296,7 +348,12 @@ try {
           random: Math.random,
           log: (mensaje) => console.info(mensaje),
         },
-        { max: argumentos.max, dryRun: argumentos.dryRun, solo: argumentos.solo },
+        {
+          max: argumentos.max,
+          dryRun: argumentos.dryRun,
+          solo: argumentos.solo,
+          vertical: argumentos.vertical,
+        },
       );
 
   if (resumen === null) {
@@ -339,7 +396,11 @@ try {
       if (barriendo) return;
       barriendo = true;
       try {
-        const resumen = await reintentarPendientes(depsConversacion());
+        // El barrido incluye todos los números pendientes, no solo el objetivo
+        // de --solo. Por eso nunca hereda el horario relajado del modo prueba.
+        const resumen = await reintentarPendientes(
+          depsConversacion(esPrueba ? DEFAULT_SAFETY_CONFIG : config),
+        );
         if (resumen.numeros > 0) {
           console.info(
             `[pendientes] ${resumen.numeros} número(s): ${resumen.respondidos} ` +
@@ -371,5 +432,6 @@ try {
   // dejaría a alguien que escribió sin respuesta y sin nada que lo indique.
   await agrupador.vaciar();
   if (wa !== null) await wa.stop();
+  restaurarConsoleInfo?.();
   store.close();
 }
