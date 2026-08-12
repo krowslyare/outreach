@@ -2,7 +2,7 @@ import { describe, expect, it } from "vitest";
 
 import { dailyCap } from "./safety.js";
 import type { SendDependencies } from "./send.js";
-import { attemptSend } from "./send.js";
+import { attemptSend, attemptSendImage } from "./send.js";
 import {
   DEFAULT_SAFETY_CONFIG,
   type AccountHealth,
@@ -75,6 +75,11 @@ function fakeDeps(options: {
         if (options.sendError !== undefined) throw options.sendError;
         return "wa-message-1";
       },
+      sendImage: async () => {
+        events.push("sendImage");
+        if (options.sendError !== undefined) throw options.sendError;
+        return "wa-image-1";
+      },
     },
     config: DEFAULT_SAFETY_CONFIG,
     now: () => NOW,
@@ -137,6 +142,9 @@ function concurrentDeps(options: {
         }
         return `wa-message-${sendCalls}`;
       },
+      sendImage: async () => {
+        throw new Error("sendImage inesperado en concurrentDeps");
+      },
     },
     config,
     now: () => NOW,
@@ -165,6 +173,32 @@ describe("attemptSend", () => {
       "loadRecipientState",
       "claimSend",
       "sendText",
+      "markSent",
+      "loadAccountHealth",
+    ]);
+  });
+
+  it("envía imagen y caption bajo la misma llave idempotente", async () => {
+    const { deps, events } = fakeDeps();
+
+    await expect(
+      attemptSendImage(
+        deps,
+        "+51999111222",
+        new Uint8Array([1, 2, 3]),
+        "Caption visual",
+        "fu1",
+      ),
+    ).resolves.toEqual({
+      allow: true,
+      messageId: 7,
+      waMessageId: "wa-image-1",
+    });
+    expect(events).toEqual([
+      "loadAccountHealth",
+      "loadRecipientState",
+      "claimSend",
+      "sendImage",
       "markSent",
       "loadAccountHealth",
     ]);

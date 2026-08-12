@@ -20,6 +20,7 @@ export type ProspectOrigin =
   | "manual"
   | "meta"
   | "places"
+  | "minem"
   | "renipress"
   | "identicole"
   | "mincetur"
@@ -229,6 +230,12 @@ function estadoWeb(web: ScoredProspect["web"]): number | null {
 }
 
 const HOSTS_SOCIALES = new Set([
+  // Un acortador no demuestra que el negocio tenga dominio propio. La URL
+  // acortada puede ser una agenda, un formulario o una red social; Places y la
+  // revisión manual siguen siendo quienes confirman la presencia web real.
+  "bit.ly",
+  // Link-in-bio pages are social profile hubs, not a managed business domain.
+  "beacons.ai",
   "facebook.com",
   "instagram.com",
   "linktr.ee",
@@ -1268,13 +1275,31 @@ export class Store {
   resolverWeb(e164: string, tieneWeb: boolean, delta: number): boolean {
     const fila = this.db
       .prepare(
-        `select source_id, has_website from recipients
-         where e164 = ? and source_id not like 'inbound:%'`,
+        `select r.source_id, r.has_website, pm.approval_status
+         from recipients r
+         join prospect_metadata pm on pm.e164 = r.e164
+         where r.e164 = ? and r.source_id not like 'inbound:%'`,
       )
       .get(e164) as
-      | { source_id: string; has_website: number | null }
+      | {
+          source_id: string;
+          has_website: number | null;
+          approval_status: ApprovalStatus;
+        }
       | undefined;
-    if (fila === undefined || fila.has_website !== null) return false;
+    if (fila === undefined) return false;
+    // A manual web check can arrive after approval (or even after the first
+    // contact). Allow only the corrective `--con-web` transition for a row
+    // already verified as no-web; never add the score twice for `--sin-web`.
+    if (!tieneWeb && fila.has_website !== null) return false;
+    if (tieneWeb && fila.has_website === 1) return false;
+    if (
+      tieneWeb &&
+      fila.has_website === 0 &&
+      fila.approval_status !== "approved"
+    ) {
+      return false;
+    }
 
     // La revisión es sobre el ESTABLECIMIENTO, no sobre un teléfono. Un mismo
     // source_id puede tener varios móviles y por lo tanto varias filas; aplicar
@@ -1284,9 +1309,9 @@ export class Store {
     const hermanos = this.db
       .prepare(
         `select e164 from recipients
-         where source_id = ? and has_website is null`,
+         where source_id = ? and (has_website is null or e164 = ?)`,
       )
-      .all(fila.source_id) as Array<{ e164: string }>;
+      .all(fila.source_id, e164) as Array<{ e164: string }>;
 
     for (const { e164: numero } of hermanos) {
       if (tieneWeb) {
@@ -1380,6 +1405,8 @@ export class Store {
     nombre: string;
     distrito: string;
     clasificacion: string;
+    /** null solo para registros legacy sin metadata de prospección. */
+    vertical: string | null;
     tieneWeb: boolean | null;
     resenas: number | null;
   } | null {
@@ -1389,15 +1416,18 @@ export class Store {
     // respuesta del agente, sin contexto y sin haber sido nunca contactado.
     const row = this.db
       .prepare(
-        `select name, district, classification, has_website, review_count
-         from recipients
-         where e164 = ? and source_id not like 'inbound:%'`,
+        `select r.name, r.district, r.classification, r.has_website,
+                r.review_count, pm.vertical
+         from recipients r
+         left join prospect_metadata pm on pm.e164 = r.e164
+         where r.e164 = ? and r.source_id not like 'inbound:%'`,
       )
       .get(e164) as
       | {
           name: string;
           district: string;
           classification: string;
+          vertical: string | null;
           has_website: number | null;
           review_count: number | null;
         }
@@ -1409,6 +1439,7 @@ export class Store {
       nombre: row.name,
       distrito: row.district,
       clasificacion: row.classification,
+      vertical: row.vertical,
       tieneWeb: row.has_website === null ? null : row.has_website !== 0,
       resenas: row.review_count,
     };

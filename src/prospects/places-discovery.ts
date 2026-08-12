@@ -130,7 +130,7 @@ export async function discoverPlaces(
       "X-Goog-FieldMask": FIELD_MASK,
     },
     body: JSON.stringify({
-      textQuery: `${input.query} en ${input.district}, Lima, Perú`,
+      textQuery: `${input.query} en ${input.district}, Perú`,
       languageCode: "es",
       regionCode: "PE",
       pageSize,

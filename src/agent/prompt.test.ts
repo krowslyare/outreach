@@ -6,11 +6,13 @@ import { contextoProspecto, SYSTEM_PROMPT } from "./prompt.js";
 function contexto(
   tieneWeb: boolean | null,
   resenas: number | null = null,
+  vertical = "health",
 ): string {
   return contextoProspecto({
     nombre: "Centro Médico Ejemplo",
     distrito: "San Isidro",
     clasificacion: "Centro médico",
+    vertical,
     tieneWeb,
     resenas,
   });
@@ -44,6 +46,17 @@ describe("contextoProspecto", () => {
       salida.indexOf("</contexto_prospecto>"),
     );
   });
+
+  it("adjunta el perfil comercial de la vertical sin mezclarlo con hechos", () => {
+    const salida = contexto(false, 10, "construction");
+
+    expect(salida).toContain("<perfil_vertical>");
+    expect(salida).toContain("Constructoras e inmobiliarias");
+    expect(salida).toContain("Elevar la imagen corporativa");
+    expect(salida).toContain(
+      "Este perfil orienta el mensaje; no prueba nada sobre el prospecto",
+    );
+  });
 });
 
 describe("SYSTEM_PROMPT", () => {
@@ -70,9 +83,18 @@ describe("SYSTEM_PROMPT", () => {
     expect(SYSTEM_PROMPT).not.toContain("con los tres planes");
   });
 
-  it("posiciona web y Portal juntos antes de recomendar un plan", () => {
+  it("posiciona el ecosistema integral antes de recomendar un plan", () => {
     expect(SYSTEM_PROMPT).toContain(
-      "La web abre la conversación; el Portal diferencia la propuesta",
+      "La web abre la conversación; el servicio integral diferencia la propuesta",
+    );
+    expect(SYSTEM_PROMPT).toContain(
+      "no tenga que coordinar varios proveedores para lanzar y gestionar su web",
+    );
+    expect(SYSTEM_PROMPT).toContain(
+      "empezar con lo necesario y ampliar después desde el mismo ecosistema",
+    );
+    expect(SYSTEM_PROMPT).toContain(
+      "activar módulos adicionales según lo necesite",
     );
     expect(SYSTEM_PROMPT).toContain(
       "Que el registro público diga que no tiene web NO significa que le calce Presencia",
@@ -88,6 +110,27 @@ describe("SYSTEM_PROMPT", () => {
     );
     expect(SYSTEM_PROMPT).toContain(
       'Di "ver las consultas que llegan"',
+    );
+    expect(SYSTEM_PROMPT).toContain(
+      "En este primer resumen menciona brevemente el Libro de Reclamaciones",
+    );
+  });
+
+  it("personaliza por rubro sin fingir una cartera sectorial", () => {
+    expect(SYSTEM_PROMPT).toContain(
+      "El rubro da contexto; no inventa una especialidad",
+    );
+    expect(SYSTEM_PROMPT).toContain(
+      'NO autoriza a decir que Kurogrid se especializa en ese rubro',
+    );
+    expect(SYSTEM_PROMPT).toContain(
+      "no como experiencia previa en toda su industria",
+    );
+    expect(SYSTEM_PROMPT).toContain(
+      "El perfil vertical decide el ángulo, no los hechos",
+    );
+    expect(SYSTEM_PROMPT).toContain(
+      "Tampoco autoriza a prometer cumplimiento legal, evitar multas",
     );
   });
 
@@ -124,6 +167,30 @@ describe("SYSTEM_PROMPT", () => {
     );
     expect(SYSTEM_PROMPT).toContain(
       'Preguntar "¿cuánto cuesta?" o "¿es caro?" NO es negociar',
+    );
+  });
+
+  it("cierra cordialmente cuando ya tienen web sin hacer más discovery", () => {
+    expect(SYSTEM_PROMPT).toContain(
+      "si la persona responde que ya tiene página web",
+    );
+    expect(SYSTEM_PROMPT).toContain(
+      "Responde con cortesía, sin pregunta y sin volver a empujar la venta",
+    );
+    expect(SYSTEM_PROMPT).toContain(
+      "No mandes el link salvo que la persona lo haya pedido",
+    );
+  });
+
+  it("no convierte un agradecimiento breve en interés ni handoff", () => {
+    expect(SYSTEM_PROMPT).toContain(
+      '"entiendo, gracias", "gracias por la info", "ya, gracias"',
+    );
+    expect(SYSTEM_PROMPT).toContain(
+      "NO es una señal de\ninterés ni una solicitud de contacto",
+    );
+    expect(SYSTEM_PROMPT).toContain(
+      'Un simple "ok", "entendido" o "gracias por la información" NO basta',
     );
   });
 });

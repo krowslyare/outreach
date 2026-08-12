@@ -14,6 +14,8 @@ export type InboundResult =
   | { action: "suppressed" }
   /** Saludo o ausencia automáticos: queda registrado y no pasa de acá. */
   | { action: "automatic"; motivo: string }
+  /** Evento sin contenido legible: corta cadencia, pero no autoriza respuesta. */
+  | { action: "empty" }
   | { action: "needs_agent" };
 
 export interface InboundDependencies {
@@ -59,6 +61,24 @@ export function handleInbound(
     );
     return { action: "suppressed" };
   }
+
+  // Una reacción de WhatsApp es actividad del prospecto, pero no contiene una
+  // petición que el agente pueda contestar. Baileys la entrega como tipo
+  // `reaction` y el adaptador conserva el marcador `[reaction]`; si cae al
+  // agente, este suele responder con un cierre genérico (y una segunda reacción
+  // puede producir otro), que se ve como un bot conversando consigo mismo.
+  // Se registra como evento sin contenido para cortar la cadencia, sin llamar
+  // al LLM ni mandar una respuesta.
+  if (evento.tipo === "reaction" || evento.body.trim() === "[reaction]") {
+    return { action: "empty" };
+  }
+
+  // Un chat vacío puede ser un mensaje eliminado o un evento incompleto de
+  // WhatsApp. Se conserva como humano para detener la cadencia —sí hubo
+  // actividad del prospecto—, pero no se le pide al agente que adivine qué
+  // quiso decir. Complete Dent demostró el modo de falla: el LLM interpretó el
+  // turno vacío como interés y produjo un handoff falso.
+  if (evento.body.trim() === "") return { action: "empty" };
 
   if (clasificacion.clase === "automatico") {
     return { action: "automatic", motivo: clasificacion.motivo };

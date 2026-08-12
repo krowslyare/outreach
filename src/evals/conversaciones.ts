@@ -30,6 +30,7 @@ const prospecto: ContextoProspecto = {
   nombre: "Clínica Sonrisa",
   distrito: "Surco",
   clasificacion: "centro odontológico",
+  vertical: "dental",
   tieneWeb: false,
   resenas: 48,
 };

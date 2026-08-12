@@ -16,6 +16,7 @@ const prospecto: ContextoProspecto = {
   nombre: "Clínica Ejemplo",
   distrito: "Miraflores",
   clasificacion: "Clínica",
+  vertical: "dental",
   tieneWeb: false,
   resenas: 42,
 };
@@ -275,6 +276,9 @@ describe("decidirRespuesta", () => {
     expect(captura.solicitud().mensajes[0]).toMatchObject({ rol: "user" });
     expect(captura.solicitud().mensajes[0]?.texto).toContain(
       "<contexto_prospecto>",
+    );
+    expect(captura.solicitud().mensajes[0]?.texto).toContain(
+      "<perfil_vertical>",
     );
   });
 

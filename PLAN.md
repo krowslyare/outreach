@@ -37,7 +37,7 @@ src/
     score.test.ts
   sequence/    M3  A quién, cuándo, con qué
     queue.ts         Cola serial, pacing con jitter, horario hábil
-    cadence.ts       Día 0 / 3 / 7-8, máx 2 follow-ups
+    cadence.ts       Día comercial 1 / 3 / 7, máx 2 follow-ups
     compose.ts       Claude → gancho personalizado por prospecto
   whatsapp/    M4  El canal
     client.ts        Sesión whatsapp-web.js, auth persistente

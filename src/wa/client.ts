@@ -63,6 +63,7 @@ export type ConsultaWhatsApp =
 
 export interface WaClient {
   sendText(e164: string, body: string): Promise<string>;
+  sendImage(e164: string, image: Uint8Array, caption: string): Promise<string>;
   /** Consulta de solo lectura; no abre conversación ni envía un mensaje. */
   getBusinessProfile(e164: string): Promise<ConsultaWhatsApp>;
   onInbound(callback: InboundHandler): void;
@@ -399,6 +400,42 @@ export class BaileysClient implements WaClient {
       throw new Error(
         `WhatsApp aceptó el envío a ${e164} pero no devolvió un id de mensaje. ` +
           `El mensaje PUEDE haber salido: revisa el chat antes de reintentar.`,
+      );
+    }
+    this.recordarPropio(waMessageId);
+    return waMessageId;
+  }
+
+  async sendImage(
+    e164: string,
+    image: Uint8Array,
+    caption: string,
+  ): Promise<string> {
+    const socket = this.socket;
+    if (socket === null) {
+      throw new Error("sendImage antes de start(): no hay sesión");
+    }
+    const digits = e164.replace(/\D/g, "");
+    if (digits.length === 0) throw new Error(`E.164 inválido: ${e164}`);
+    if (image.byteLength === 0) throw new Error("imagen vacía: no se envía nada");
+
+    const encontrados = await socket.onWhatsApp(digits);
+    const contacto = encontrados?.find((c) => c.exists);
+    if (contacto === undefined) {
+      throw new Error(
+        `${e164} no está registrado en WhatsApp; no se envía nada.`,
+      );
+    }
+
+    const mensaje = await socket.sendMessage(contacto.jid, {
+      image: Buffer.from(image),
+      caption,
+    });
+    const waMessageId = mensaje?.key?.id;
+    if (typeof waMessageId !== "string") {
+      throw new Error(
+        `WhatsApp aceptó la imagen a ${e164} pero no devolvió un id de mensaje. ` +
+          `La imagen PUEDE haber salido: revisa el chat antes de reintentar.`,
       );
     }
     this.recordarPropio(waMessageId);

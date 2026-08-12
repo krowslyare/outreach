@@ -23,7 +23,7 @@ import {
   type ProspectOrigin,
 } from "../wa/store.js";
 
-const ORIGENES_ENTRADA = ["manual", "meta", "places"] as const;
+const ORIGENES_ENTRADA = ["manual", "meta", "places", "minem"] as const;
 type OrigenEntrada = (typeof ORIGENES_ENTRADA)[number];
 
 function valor(args: readonly string[], nombre: string): string | undefined {
@@ -96,7 +96,9 @@ function imprimirVerticales(): void {
     console.info(
       `${item.id} · prioridad ${item.priority} · ${item.label}\n` +
         `  Búsquedas: ${item.placeQueries.join(" | ")}\n` +
-        `  Producto: ${item.productHooks.join(" · ")}\n` +
+        `  Ángulo: ${item.commercial.primaryAngle}\n` +
+        `  Producto: ${item.commercial.productHooks.join(" · ")}\n` +
+        `  Cumplimiento: ${item.commercial.complianceAngle}\n` +
         `  Registro: ${item.registry}\n`,
     );
   }
@@ -204,7 +206,12 @@ function inputDesdeArgs(args: readonly string[]): ManualProspectInput {
 function ocultarLogsSensiblesLibsignal(): () => void {
   const original = console.info;
   console.info = (...values: unknown[]): void => {
-    if (values[0] === "Closing session:") return;
+    if (
+      values[0] === "Closing session:" ||
+      values[0] === "Removing old closed session:"
+    ) {
+      return;
+    }
     original(...values);
   };
   return () => {
@@ -463,6 +470,7 @@ async function main(): Promise<void> {
       "manual",
       "meta",
       "places",
+      "minem",
       "renipress",
       "identicole",
       "mincetur",

@@ -36,6 +36,23 @@ El orden para dental es:
 Tener muchos seguidores no compensa una web propia. Tener pocas reseñas exige
 otra señal fuerte, como anuncios actuales o una especialización clara.
 
+### Prioridad operativa durante el fine-tuning
+
+La siguiente hipótesis a validar es `contractors`: contratistas mineros,
+industriales, de energía, petróleo y construcción B2B. Su compra potencial no
+depende tanto de conseguir una cita inmediata; depende de que compras,
+ingeniería o un cliente corporativo pueda validar capacidad, proyectos,
+credenciales y pedir una cotización con confianza.
+
+El registro MINEM sirve como índice de empresas y capacidades declaradas. No
+autoriza el contacto por sí solo: cada fila debe pasar por web, teléfono y
+perfil actual de WhatsApp. Una referencia directa —por ejemplo, un conocido que
+pueda presentar al responsable— tiene prioridad sobre el cold outreach.
+
+Dental, veterinaria y estética quedan como cohortes de aprendizaje y no como
+la única apuesta comercial. No se aumenta el volumen hasta auditar la cohorte
+existente y validar el primer experimento B2B.
+
 ## Fuentes, en orden
 
 | Prioridad | Fuente | Qué demuestra | Uso |
@@ -43,6 +60,7 @@ otra señal fuerte, como anuncios actuales o una especialización clara.
 | A | Anuncio activo de Meta visto en Ad Library o en el feed | Intención y presupuesto actuales | Entrada manual con URL del anuncio |
 | A/B | Google Places por rubro y distrito | Operación, móvil, reseñas y web reportada | Descubrimiento automático acotado |
 | B | RENIPRESS, Identicole, MINCETUR | Formalidad y rubro | Base para validar, no permiso de contacto |
+| B | MINEM — registro de contratistas mineros | Actividad minera declarada, RUC, teléfono y capacidades registradas | Índice B2B para enriquecer con web/WhatsApp; no permiso de contacto |
 | B | Instagram activo sin web, encontrado manualmente | Actividad reciente y oferta visible | Entrada manual con evidencia |
 | C | Referidos de fotógrafos, community managers, contadores o consultores | Confianza transferida | Entrada manual; separar del cold outreach |
 
@@ -74,6 +92,8 @@ Después de tener datos:
 
 - `legal`: consultas calificadas y presentación de equipo.
 - `hospitality`: reservas, promociones y catálogo.
+- `contractors`: credenciales, proyectos, cotizaciones y presencia B2B para
+  contratistas industriales, mineros y de servicios.
 
 Las reglas viven en `src/prospects/verticals.ts`. Cada cohorte se mide por
 separado; mezclar dentales con veterinarias hace imposible saber qué oferta y

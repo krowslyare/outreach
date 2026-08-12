@@ -10,7 +10,12 @@
 // posterga es la respuesta.
 
 /** Cuánto silencio hace falta para dar la ráfaga por terminada. */
-export const ESPERA_RAFAGA_MS = 4_000;
+// Cuarenta y cinco segundos dan margen para que la persona mande un segundo o
+// tercer mensaje antes de que el agente empiece a componer. La composición del
+// agente suma su propio tiempo encima; una espera corta fue precisamente lo que
+// hizo que Priority Dent recibiera un cierre al saludo antes de leer su segundo
+// mensaje.
+export const ESPERA_RAFAGA_MS = 45_000;
 
 interface Pendiente {
   timer: ReturnType<typeof setTimeout>;
