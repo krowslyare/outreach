@@ -11,6 +11,7 @@
     "descubrir": "tsx src/cli/descubrir.ts",
     "harvest": "tsx src/cli/harvest.ts",
     "sembrar": "tsx src/cli/sembrar.ts",
+    "eval:conversaciones": "tsx src/evals/conversaciones.ts",
     "prospectos": "tsx src/cli/prospectos.ts",
     "test": "vitest run --passWithNoTests",
     "test:watch": "vitest",

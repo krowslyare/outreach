@@ -164,11 +164,18 @@ export function mensajeParaProspecto(
     );
   }
 
+  const respuestaConcreta = decision.respuestaConcreta?.trim();
+  const prefijo =
+    respuestaConcreta === undefined || respuestaConcreta === ""
+      ? ""
+      : `${respuestaConcreta}\n\n`;
+
   // Tres opciones y no solo "una llamada": la llamada tiene fricción —hay que
   // agendarla, contestar, estar libre— y seguir por el chat no tiene ninguna.
   // Dejar elegir quita la excusa de "ahorita no puedo hablar".
   return (
-    "Perfecto. Le paso la conversación con el dueño del estudio para que lo " +
+    prefijo +
+    "Le paso la conversación con el dueño del estudio para que lo " +
     "vea con usted directamente.\n" +
     "¿Cómo prefiere: una llamada corta, una reunión, o seguimos por acá?"
   );

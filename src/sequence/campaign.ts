@@ -18,6 +18,8 @@ const MAX_POR_DEFECTO = 20;
 export interface OpcionesTanda {
   max?: number;
   dryRun?: boolean;
+  /** Restringe la tanda a una cohorte comercial sin mezclar rubros. */
+  vertical?: string;
   /**
    * Restringe la tanda a un solo destinatario, para probar contra un teléfono
    * propio sin que el resto de la cola entre por accidente.
@@ -84,6 +86,7 @@ export interface DependenciasCampana {
  * es solo el tamaño del barrido para no cargar los ~1,100 de una.
  */
 const TAMANO_PAGINA = 100;
+const MAX_INTENTOS_AUDITORIA = 3;
 const INTENCIONES_APERTURA: readonly IntencionApertura[] = [
   "derivacion",
   "busqueda",
@@ -165,7 +168,11 @@ export async function ejecutarTanda(
     opts.solo === undefined
       ? [...lista]
       : lista.filter((candidato) => candidato.e164 === opts.solo);
-  let pagina = deps.store.candidatosParaContactar(TAMANO_PAGINA, desplazamiento);
+  let pagina = deps.store.candidatosParaContactar(
+    TAMANO_PAGINA,
+    desplazamiento,
+    opts.vertical,
+  );
   const resumen: ResumenTanda = {
     enviados: 0,
     saltadosPorDestinatario: 0,
@@ -243,42 +250,56 @@ export async function ejecutarTanda(
       ...aperturasDeLaTanda,
       ...deps.store.aperturasRecientes(15),
     ];
-    const composicion = await componerMensaje(
-      deps.proveedor,
-      contextoDe(ficha),
-      paso,
-      historialPrevio,
-      intencionParaIndice(indiceCandidato),
-      aperturasRecientes,
-    );
-    if (!composicion.ok) {
-      resumen.fallosComposicion += 1;
-      deps.log?.(
-        `${candidato.e164} no se compuso: ${composicion.motivo}`,
+    let textoAprobado: string | null = null;
+    for (let intento = 0; intento < MAX_INTENTOS_AUDITORIA; intento += 1) {
+      const composicion = await componerMensaje(
+        deps.proveedor,
+        contextoDe(ficha),
+        paso,
+        historialPrevio,
+        intencionParaIndice(indiceCandidato + intento),
+        aperturasRecientes,
       );
-      continue;
-    }
+      if (!composicion.ok) {
+        resumen.fallosComposicion += 1;
+        deps.log?.(
+          `${candidato.e164} no se compuso: ${composicion.motivo}`,
+        );
+        break;
+      }
 
-    const auditoria = auditarMensaje(composicion.texto, {
-      clasificacion: ficha.clasificacion,
-      aperturasRecientes,
-    });
-    if (!auditoria.ok) {
-      resumen.fallosComposicion += 1;
-      deps.log?.(
-        `${candidato.e164} no pasó auditoría: ${auditoria.motivos.join("; ")}`,
-      );
-      continue;
+      const auditoria = auditarMensaje(composicion.texto, {
+        clasificacion: ficha.clasificacion,
+        aperturasRecientes,
+        paso,
+      });
+      if (auditoria.ok) {
+        textoAprobado = composicion.texto;
+        break;
+      }
+
+      const motivo = auditoria.motivos.join("; ");
+      if (intento + 1 < MAX_INTENTOS_AUDITORIA) {
+        deps.log?.(
+          `${candidato.e164} no pasó auditoría (${motivo}); recomponiendo con otra apertura`,
+        );
+      } else {
+        resumen.fallosComposicion += 1;
+        deps.log?.(
+          `${candidato.e164} no pasó auditoría tras ${MAX_INTENTOS_AUDITORIA} intentos: ${motivo}`,
+        );
+      }
     }
+    if (textoAprobado === null) continue;
 
     if (opts.dryRun === true) {
       resumen.mensajesCompuestos.push({
         e164: candidato.e164,
         nombre: normalizarNombre(ficha.nombre),
         paso,
-        texto: composicion.texto,
+        texto: textoAprobado,
       });
-      aperturasDeLaTanda.unshift(composicion.texto.slice(0, 80));
+      aperturasDeLaTanda.unshift(textoAprobado.slice(0, 80));
       producidos += 1;
       continue;
     }
@@ -291,7 +312,7 @@ export async function ejecutarTanda(
         now: deps.now,
       },
       candidato.e164,
-      composicion.texto,
+      textoAprobado,
       paso,
     );
     if (!resultado.allow) {
@@ -301,7 +322,7 @@ export async function ejecutarTanda(
       continue;
     }
 
-    aperturasDeLaTanda.unshift(composicion.texto.slice(0, 80));
+    aperturasDeLaTanda.unshift(textoAprobado.slice(0, 80));
     resumen.enviados += 1;
     producidos += 1;
     deps.log?.(`${candidato.e164} enviado (${paso})`);
@@ -314,7 +335,11 @@ export async function ejecutarTanda(
    }
 
    desplazamiento += pagina.length;
-   pagina = deps.store.candidatosParaContactar(TAMANO_PAGINA, desplazamiento);
+   pagina = deps.store.candidatosParaContactar(
+     TAMANO_PAGINA,
+     desplazamiento,
+     opts.vertical,
+   );
   }
 
   resumen.motivoTerminacion = `tanda completada (${evaluados} candidatos evaluados)`;

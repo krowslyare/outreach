@@ -39,6 +39,18 @@ describe("auditarMensaje", () => {
     ).toEqual({ ok: true });
   });
 
+  it("no confunde un rubro natural nuevo con taxonomía de padrón", () => {
+    expect(
+      auditarMensaje(
+        "Ayudamos a clínicas veterinarias a presentar sus servicios.",
+        {
+          clasificacion: "CLÍNICAS VETERINARIAS",
+          aperturasRecientes: [],
+        },
+      ),
+    ).toEqual({ ok: true });
+  });
+
   it.each([
     "El plan cuesta S/ 500.",
     "El servicio cuesta soles 500.",
@@ -73,6 +85,28 @@ describe("auditarMensaje", () => {
       motivos: [
         "repite las primeras cinco palabras de una apertura reciente",
       ],
+    });
+  });
+
+  it("exige una sola pregunta al final del primer contacto", () => {
+    expect(
+      auditarMensaje(
+        "¿Hoy coordinan por WhatsApp? Nosotros hacemos y mantenemos la web.",
+        { ...CONTEXTO, paso: "first" },
+      ),
+    ).toEqual({
+      ok: false,
+      motivos: ["la pregunta del primer contacto debe ir al final"],
+    });
+
+    expect(
+      auditarMensaje(
+        "Le escribo de Kurogrid. ¿Coordinan por WhatsApp? ¿Le cuento la idea?",
+        { ...CONTEXTO, paso: "first" },
+      ),
+    ).toEqual({
+      ok: false,
+      motivos: ["el primer contacto debe tener una sola pregunta (2)"],
     });
   });
 

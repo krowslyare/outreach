@@ -382,6 +382,43 @@ describe("manejarInbound", () => {
     );
   });
 
+  it("contesta una duda concreta en el mismo mensaje que ejecuta el handoff", async () => {
+    const respuestaConcreta =
+      "La opción que reúne todo eso es Empresa + — S/ 649 mensual.";
+    const { deps, enviar } = crearDobles({
+      respuesta: {
+        corte: "fin",
+        texto: "",
+        herramienta: {
+          nombre: "escalar_a_humano",
+          input: {
+            motivo: "quiere_contratar",
+            resumen: "Quiere todo y preguntó el precio.",
+            respuesta_concreta: respuestaConcreta,
+          },
+        },
+      },
+    });
+
+    await expect(
+      manejarInbound(deps, eventoInbound("Todo si es posible, ¿es caro?")),
+    ).resolves.toEqual({
+      accion: "escalado",
+      motivo: "quiere_contratar",
+    });
+
+    expect(
+      enviar.mock.calls.some(
+        ([destino, texto]) =>
+          destino === E164 && texto.startsWith(respuestaConcreta),
+      ),
+    ).toBe(true);
+    expect(enviar).toHaveBeenCalledWith(
+      E164,
+      expect.stringContaining("¿Cómo prefiere"),
+    );
+  });
+
   it("marca perdido y suprime al prospecto sin enviar", async () => {
     const { deps, store, enviar } = crearDobles({
       respuesta: {

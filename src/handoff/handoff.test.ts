@@ -287,6 +287,19 @@ describe("mensajeParaProspecto", () => {
     expect(mensaje.split("?").length - 1).toBe(1);
   });
 
+  it("responde una duda concreta antes del acuse fijo", () => {
+    const respuesta =
+      "La opción que reúne todo eso es Empresa + — S/ 649 mensual.";
+    const mensaje = mensajeParaProspecto({
+      ...DECISION_ESCALAR,
+      respuestaConcreta: respuesta,
+    });
+
+    expect(mensaje.startsWith(`${respuesta}\n\nLe paso`)).toBe(true);
+    expect(mensaje).toContain("¿Cómo prefiere");
+    expect(mensaje.split("?").length - 1).toBe(1);
+  });
+
   // Ofrecerle a alguien molesto que elija entre llamada y reunión suena a que
   // nadie leyó su queja.
   it("a una queja no le ofrece un menú de opciones", () => {

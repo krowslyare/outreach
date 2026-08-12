@@ -30,6 +30,11 @@ describe("rubroNatural", () => {
     ["PATOLOGIA CLINICA", "laboratorio"],
     ["DIAGNOSTICO POR IMAGENES", "centro de diagnóstico por imágenes"],
     ["CENTROS DE SALUD O CENTROS MEDICOS", "centro médico"],
+    ["CLÍNICAS VETERINARIAS", "clínica veterinaria"],
+    ["CENTROS DE ESTÉTICA Y DERMATOLOGÍA", "centro estético"],
+    ["COLEGIOS PRIVADOS, NIDOS Y ACADEMIAS", "institución educativa"],
+    ["ESTUDIOS JURÍDICOS Y CONTABLES", "estudio profesional"],
+    ["HOSPEDAJES Y OPERADORES TURÍSTICOS", "negocio turístico"],
   ])("traduce %s", (clasificacion, esperado) => {
     expect(rubroNatural(clasificacion)).toBe(esperado);
   });

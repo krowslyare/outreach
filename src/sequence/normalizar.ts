@@ -83,10 +83,22 @@ const RUBROS_NATURALES = new Map<string, string>([
   ["PATOLOGIA CLINICA", "laboratorio"],
   ["DIAGNOSTICO POR IMAGENES", "centro de diagnóstico por imágenes"],
   ["CENTROS DE SALUD O CENTROS MEDICOS", "centro médico"],
+  ["CLINICAS Y CONSULTORIOS DENTALES", "clínica dental"],
+  ["CLINICAS VETERINARIAS", "clínica veterinaria"],
+  ["CENTROS DE ESTETICA Y DERMATOLOGIA", "centro estético"],
+  ["CENTROS MEDICOS Y POLICLINICOS", "centro médico"],
+  ["COLEGIOS PRIVADOS, NIDOS Y ACADEMIAS", "institución educativa"],
+  ["ESTUDIOS JURIDICOS Y CONTABLES", "estudio profesional"],
+  ["HOSPEDAJES Y OPERADORES TURISTICOS", "negocio turístico"],
 ]);
 
 export function rubroNatural(clasificacion: string): string {
-  const clave = clasificacion.trim().replace(/\s+/g, " ").toLocaleUpperCase("es-PE");
+  const clave = clasificacion
+    .normalize("NFD")
+    .replace(/\p{Diacritic}/gu, "")
+    .trim()
+    .replace(/\s+/g, " ")
+    .toLocaleUpperCase("es-PE");
   // El fallback nunca refleja el padrón: una categoría nueva debe degradar a
   // lenguaje seguro, no filtrarse tal cual al mensaje.
   return RUBROS_NATURALES.get(clave) ?? "consultorio";
