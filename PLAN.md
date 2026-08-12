@@ -3,6 +3,9 @@
 De "no conozco a nadie" a "el prospecto quiere cerrar y te pide hablar contigo".
 El cierre lo haces tú. Todo lo anterior corre solo.
 
+> Estado operativo actual: la prospección ya no autoriza envíos automáticamente.
+> El flujo vigente, los verticales y los comandos están en `PROSPECTING.md`.
+
 ## Decisiones tomadas
 
 | Decisión | Elección | Por qué |
@@ -11,7 +14,7 @@ El cierre lo haces tú. Todo lo anterior corre solo.
 | Integración con portal | **Un solo punto**: crear la Oportunidad en el handoff | Integración, no fusión. Arranca como "avísame" y añade el write después. |
 | Lenguaje | **TypeScript** | El bot *tiene* que ser Node (las libs son Node-only). Un runtime en vez de dos. Ya escribes TS en el portal. `build_sheet.py` se queda como está. |
 | Hosting | **VPS chico con proceso supervisado** (systemd) | Necesita proceso persistente + disco para el auth state. Vercel no aplica. Fly.io tampoco: sus máquinas suspenden, y eso mata la sesión de WhatsApp. |
-| Dirección del flujo | **Registro oficial → Places**, no al revés | No hay llave común Places↔SUNAT; matchear razón social con nombre comercial es fuzzy y falla. Arrancando del registro, el RUC 20 viene dado. |
+| Dirección del flujo | **Dos entradas: registro → Places y categoría → Places** | Los registros validan formalidad donde existen; Text Search permite descubrir verticales sin padrón nacional, siempre con revisión posterior. |
 | DB | **SQLite vía `node:sqlite`** (builtin, cero deps) | Revertido de Supabase: la DB está en el camino crítico del envío y un parpadeo de red no debe romper un envío ni perder ACKs. El proceso ya es instancia única (la sesión de WhatsApp no se comparte), así que no hay argumento de concurrencia para una DB servidor. Supabase queda como read-model si se quiere ver desde el portal. |
 | Canal 1er toque | WhatsApp directo, riesgo asumido | Es donde están, y una empresa sin web no tiene email corporativo. IG descartado: no hay cuenta creada. |
 | Volumen | 10-20/día | Ritmo humano. Suficiente para validar el pitch antes de escalar. |
@@ -22,11 +25,13 @@ El cierre lo haces tú. Todo lo anterior corre solo.
 
 ```
 src/
-  harvest/     M1  Fuentes → prospectos crudos
-    places.ts        Google Places: negocios SIN websiteUri + teléfono
-    sunat.ts         Padrón reducido: RUC 20, estado ACTIVO, condición HABIDO, ubigeo
-    adlibrary.ts     Meta Ad Library: ¿ya paga ads?
-    dedupe.ts
+  harvest/     M1  Registro RENIPRESS → validación con Places
+  prospects/   M1b Fuentes y verticales modulares
+    verticals.ts             prioridad, búsquedas y hooks por rubro
+    places-discovery.ts      descubrimiento por categoría y distrito
+  cli/
+    prospectos.ts            entrada manual/Meta + gate de aprobación
+    descubrir.ts             shortlist de Places; nunca autoaprueba
   score/       M2  Fit para el servicio administrado — puro, sin IO, testeable
     score.ts
     score.test.ts
@@ -53,7 +58,8 @@ src/
 Base obligatoria: RUC empieza en 20 (persona jurídica), estado ACTIVO, condición HABIDO, sin `websiteUri` en Places, con teléfono.
 
 Luego suma:
-- **Ya gasta en publicidad** (Meta Ad Library) — la más fuerte. Paga ads y no tiene web: está quemando ese dinero. Es a la vez señal de capacidad de pago y el mejor gancho de venta.
+- **Ya gasta en publicidad** (Meta Ad Library) — la señal más fuerte, pero entra
+  manualmente con su URL. No se implementó un scraper dependiente de la UI.
 - **Rubro de margen alto** — dental, veterinaria, legal, colegios privados, gimnasios, estética, ópticas.
 - **Volumen de reseñas en Google** — filtra RUC fantasma; prueba de negocio operando.
 - **Distrito y multi-local** — Miraflores, San Isidro, Surco, La Molina; más de una sede.
@@ -225,9 +231,9 @@ riesgo en ese tramo es bastante menor que en un match de 0.70.
 
 - **Google Places** (Text Search, field mask) — opera, teléfono, sin web, reseñas.
 - **Padrón Reducido SUNAT** — RUC 20, estado, condición, ubigeo. Datos abiertos.
-- **RENIPRESS** — registro de establecimientos de salud: dentistas, clínicas, veterinarias.
-  Cruza directo con el rubro de margen alto. Vía verticales oficiales el fit es mucho mejor
-  que barriendo Places a ciegas.
+- **RENIPRESS** — registro de establecimientos de salud: dentistas y clínicas.
+- **Identicole** — fuente oficial para educación privada.
+- **MINCETUR** — directorios de hospedajes, agencias y restaurantes calificados.
 - **Meta Ad Library** — ¿ya paga ads? (verificar acceso programático)
 
 Ojo: **ausencia de `websiteUri` significa dato ausente, no que no tenga web.** Hace falta
@@ -236,7 +242,8 @@ un paso de verificación antes de contactar.
 ## Pendientes de resolver
 
 - Padrón Reducido SUNAT: confirmar qué columnas trae hoy (el conteo de trabajadores probablemente NO está — usar reseñas y rubro como proxy).
-- Meta Ad Library: verificar acceso programático y sus límites.
+- Automatización de Meta: mantener entrada manual/browser-assisted hasta contar
+  con acceso programático oficial estable para anuncios comerciales peruanos.
 - Número de reemplazo: cómo conseguir eSIM peruana rápido cuando toque.
 
 ## Piloto antes de construir el agente

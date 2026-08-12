@@ -15,6 +15,63 @@ const require = createRequire(import.meta.url);
 const { DatabaseSync } = require("node:sqlite") as typeof import("node:sqlite");
 
 export type SendStep = "first" | "fu1" | "fu2";
+export type ApprovalStatus = "pending" | "approved" | "rejected";
+export type ProspectOrigin =
+  | "manual"
+  | "meta"
+  | "places"
+  | "renipress"
+  | "identicole"
+  | "mincetur"
+  | "test";
+
+export interface ManualProspectInput {
+  e164: string;
+  name: string;
+  district: string;
+  classification: string;
+  vertical: string;
+  origin: ProspectOrigin;
+  sourceUrl?: string;
+  notes?: string;
+  score: number;
+  verifiedWithoutWebsite: boolean;
+  approve: boolean;
+}
+
+export interface WhatsAppBusinessProfile {
+  description: string;
+  category: string | null;
+  address: string | null;
+  websites: readonly string[];
+}
+
+export interface ProspectReviewRow {
+  e164: string;
+  sourceId: string;
+  name: string;
+  district: string;
+  classification: string;
+  score: number | null;
+  hasWebsite: boolean | null;
+  reviewCount: number | null;
+  vertical: string;
+  origin: string;
+  sourceUrl: string | null;
+  notes: string | null;
+  approvalStatus: ApprovalStatus;
+  reviewReason: string | null;
+  reviewedAt: string | null;
+  waDescription: string | null;
+  waCategory: string | null;
+  waAddress: string | null;
+  waWebsites: string[];
+  waCheckedAt: string | null;
+}
+
+export type ReviewMutationResult =
+  | { ok: true; affected: number }
+  | { ok: false; reason: string };
 
 /**
  * Qué corresponde hacer con un entrante recién llegado.
@@ -79,6 +136,25 @@ create table if not exists account_state (
   id integer primary key check (id = 1), campaign_started_at text,
   kill_switch_tripped integer not null default 0, kill_switch_reason text,
   kill_switch_at text, device_rate_baseline real);
+
+-- La identidad comercial y la aprobación viven separadas del registro base.
+-- RENIPRESS/Places dicen "qué encontramos"; esta tabla dice "¿lo revisamos y
+-- autorizamos para campaña?". La campaña falla cerrada: sin approved no sale.
+create table if not exists prospect_metadata (
+  e164 text primary key references recipients(e164) on delete cascade,
+  vertical text not null,
+  origin text not null,
+  source_url text,
+  notes text,
+  approval_status text not null default 'pending'
+    check (approval_status in ('pending', 'approved', 'rejected')),
+  review_reason text,
+  reviewed_at text,
+  wa_description text,
+  wa_category text,
+  wa_address text,
+  wa_websites text,
+  wa_checked_at text);
 `;
 
 function asDate(value: string | null): Date | null {
@@ -152,6 +228,28 @@ function estadoWeb(web: ScoredProspect["web"]): number | null {
   return web.verificadoSinWeb === true ? 0 : null;
 }
 
+const HOSTS_SOCIALES = new Set([
+  "facebook.com",
+  "instagram.com",
+  "linktr.ee",
+  "tiktok.com",
+  "wa.me",
+  "whatsapp.com",
+  "youtube.com",
+]);
+
+export function esSitioPropio(value: string): boolean {
+  try {
+    const parsed = new URL(value.includes("://") ? value : `https://${value}`);
+    const host = parsed.hostname.toLowerCase().replace(/^www\./, "");
+    return ![...HOSTS_SOCIALES].some(
+      (social) => host === social || host.endsWith(`.${social}`),
+    );
+  } catch {
+    return false;
+  }
+}
+
 export class Store {
   private readonly db: InstanceType<typeof DatabaseSync>;
 
@@ -213,6 +311,59 @@ export class Store {
       `update messages
        set step = substr(idempotency_key, instr(idempotency_key, ':') + 1)
        where step is null and idempotency_key is not null`,
+    );
+
+    // Bases anteriores no tienen metadata. Se rellenan en pending para que
+    // instalar este gate no autorice por accidente los prospectos históricos.
+    // Solo los teléfonos propios sembrados para pruebas nacen aprobados.
+    this.db.exec(
+      `insert into prospect_metadata (
+         e164, vertical, origin, approval_status, reviewed_at
+       )
+       select
+         e164,
+         case
+           when upper(classification) like '%ODONTO%' then 'dental'
+           when upper(classification) like '%VETERIN%' then 'veterinary'
+           when upper(classification) like '%ESTET%' or upper(classification) like '%DERMAT%'
+             then 'aesthetics'
+           when upper(classification) like '%COLEG%' or upper(classification) like '%EDUC%'
+             then 'education'
+           else 'health'
+         end,
+         case
+           when source_id like 'prueba:%' then 'test'
+           when source_id like 'meta:%' then 'meta'
+           when source_id like 'manual:%' then 'manual'
+           else 'renipress'
+         end,
+         case when source_id like 'prueba:%' then 'approved' else 'pending' end,
+         case when source_id like 'prueba:%' then created_at else null end
+       from recipients
+       where true
+       on conflict(e164) do nothing`,
+    );
+
+    // RENIPRESS clasifica varios consultorios dentales como una categoría
+    // médica genérica. El nombre comercial sí trae "dental"/"odonto"; usar
+    // ambos evita que ODONTOP o DENTAL VIEIRA terminen en el módulo health.
+    this.db.exec(
+      `update prospect_metadata
+       set vertical = case
+         when upper(r.classification) like '%ODONTO%'
+           or upper(r.name) like '%ODONTO%'
+           or upper(r.name) like '%DENTAL%'
+           then 'dental'
+         when upper(r.classification) like '%ESTET%'
+           or upper(r.classification) like '%DERMAT%'
+           or upper(r.name) like '%ESTET%'
+           or upper(r.name) like '%DERMAT%'
+           then 'aesthetics'
+         else prospect_metadata.vertical
+       end
+       from recipients r
+       where r.e164 = prospect_metadata.e164
+         and prospect_metadata.origin = 'renipress'`,
     );
   }
 
@@ -292,12 +443,327 @@ export class Store {
             estadoWeb(prospect.web),
             prospect.web.userRatingCount,
           );
+          this.db
+            .prepare(
+              `insert into prospect_metadata (
+                 e164, vertical, origin, approval_status, reviewed_at
+               ) values (?, ?, ?, ?, ?)
+               on conflict(e164) do nothing`,
+            )
+            .run(
+              phone.e164,
+              this.inferirVertical(prospect.classification, prospect.name),
+              prospect.sourceId.startsWith("prueba:") ? "test" : "renipress",
+              prospect.sourceId.startsWith("prueba:") ? "approved" : "pending",
+              prospect.sourceId.startsWith("prueba:") ? createdAt : null,
+            );
         }
       }
       this.db.exec("commit");
     } catch (error) {
       this.db.exec("rollback");
       throw error;
+    }
+  }
+
+  private inferirVertical(classification: string, name: string): string {
+    const value = `${classification} ${name}`
+      .normalize("NFD")
+      .replace(/\p{Diacritic}/gu, "")
+      .toLocaleUpperCase("es-PE");
+    if (value.includes("ODONTO")) return "dental";
+    if (value.includes("VETERIN")) return "veterinary";
+    if (value.includes("ESTET") || value.includes("DERMAT")) return "aesthetics";
+    if (value.includes("COLEG") || value.includes("EDUC")) return "education";
+    return "health";
+  }
+
+  upsertManualProspect(input: ManualProspectInput): void {
+    if (!/^\+51\d{9}$/.test(input.e164)) {
+      throw new Error(`E.164 peruano inválido: ${input.e164}`);
+    }
+    if (!Number.isSafeInteger(input.score) || input.score < 0 || input.score > 100) {
+      throw new RangeError("score debe ser un entero entre 0 y 100");
+    }
+    if (input.approve && !input.verifiedWithoutWebsite) {
+      throw new Error(
+        "no se puede aprobar sin confirmar que el prospecto no tiene web",
+      );
+    }
+
+    const now = this.clock().toISOString();
+    const sourceId = `${input.origin}:${input.e164}`;
+    const hasWebsite = input.verifiedWithoutWebsite ? 0 : null;
+
+    this.db.exec("begin immediate");
+    try {
+      this.db
+        .prepare(
+          `insert into recipients (
+             e164, source_id, name, district, classification, score, created_at,
+             has_website, review_count
+           ) values (?, ?, ?, ?, ?, ?, ?, ?, null)
+           on conflict(e164) do update set
+             name = excluded.name,
+             district = excluded.district,
+             classification = excluded.classification,
+             score = max(coalesce(recipients.score, 0), excluded.score),
+             has_website = coalesce(excluded.has_website, recipients.has_website)`,
+        )
+        .run(
+          input.e164,
+          sourceId,
+          input.name,
+          input.district,
+          input.classification,
+          input.score,
+          now,
+          hasWebsite,
+        );
+
+      this.db
+        .prepare(
+          `insert into prospect_metadata (
+             e164, vertical, origin, source_url, notes, approval_status,
+             reviewed_at, review_reason
+           ) values (?, ?, ?, ?, ?, 'pending', null, null)
+           on conflict(e164) do update set
+             vertical = excluded.vertical,
+             origin = excluded.origin,
+             source_url = coalesce(excluded.source_url, prospect_metadata.source_url),
+             notes = coalesce(excluded.notes, prospect_metadata.notes)`,
+        )
+        .run(
+          input.e164,
+          input.vertical,
+          input.origin,
+          input.sourceUrl?.trim() || null,
+          input.notes?.trim() || null,
+        );
+      this.db.exec("commit");
+    } catch (error) {
+      this.db.exec("rollback");
+      throw error;
+    }
+
+    if (input.approve) {
+      const result = this.aprobarProspecto(input.e164);
+      if (!result.ok) {
+        throw new Error(`no se pudo aprobar ${input.e164}: ${result.reason}`);
+      }
+    }
+  }
+
+  aprobarProspecto(e164: string): ReviewMutationResult {
+    const row = this.db
+      .prepare(
+        `select r.source_id, r.has_website, r.suppressed, r.human_takeover,
+                pm.origin, pm.wa_checked_at, pm.wa_websites
+         from recipients r
+         join prospect_metadata pm on pm.e164 = r.e164
+         where r.e164 = ?`,
+      )
+      .get(e164) as
+      | {
+          source_id: string;
+          has_website: number | null;
+          suppressed: number;
+          human_takeover: number;
+          origin: string;
+          wa_checked_at: string | null;
+          wa_websites: string | null;
+        }
+      | undefined;
+
+    if (row === undefined) return { ok: false, reason: "prospecto inexistente" };
+    if (row.suppressed !== 0) return { ok: false, reason: "prospecto suprimido" };
+    if (row.human_takeover !== 0) {
+      return { ok: false, reason: "conversación tomada por humano" };
+    }
+    if (row.origin !== "test" && row.wa_checked_at === null) {
+      return {
+        ok: false,
+        reason: "falta consultar el perfil actual de WhatsApp",
+      };
+    }
+    if (this.parseWebsites(row.wa_websites).some(esSitioPropio)) {
+      return {
+        ok: false,
+        reason: "el perfil de WhatsApp muestra un sitio web propio",
+      };
+    }
+    if (row.has_website !== 0) {
+      return {
+        ok: false,
+        reason:
+          row.has_website === 1
+            ? "el prospecto ya tiene web"
+            : "todavía no se confirmó que no tenga web",
+      };
+    }
+
+    const now = this.clock().toISOString();
+    this.db.exec("begin immediate");
+    try {
+      // Un negocio puede traer dos móviles. Se aprueba UNO y los hermanos se
+      // rechazan para impedir dos primeros contactos al mismo establecimiento.
+      const siblings = this.db
+        .prepare("select e164 from recipients where source_id = ?")
+        .all(row.source_id) as Array<{ e164: string }>;
+      for (const sibling of siblings) {
+        const approved = sibling.e164 === e164;
+        this.db
+          .prepare(
+            `update prospect_metadata
+             set approval_status = ?,
+                 review_reason = ?,
+                 reviewed_at = ?
+             where e164 = ?`,
+          )
+          .run(
+            approved ? "approved" : "rejected",
+            approved
+              ? null
+              : `otro número del mismo establecimiento; se aprobó ${e164}`,
+            now,
+            sibling.e164,
+          );
+      }
+      this.db.exec("commit");
+      return { ok: true, affected: siblings.length };
+    } catch (error) {
+      this.db.exec("rollback");
+      throw error;
+    }
+  }
+
+  rechazarProspecto(e164: string, reason: string): ReviewMutationResult {
+    const row = this.db
+      .prepare("select source_id from recipients where e164 = ?")
+      .get(e164) as { source_id: string } | undefined;
+    if (row === undefined) return { ok: false, reason: "prospecto inexistente" };
+
+    const result = this.db
+      .prepare(
+        `update prospect_metadata
+         set approval_status = 'rejected', review_reason = ?, reviewed_at = ?
+         where e164 in (select e164 from recipients where source_id = ?)`,
+      )
+      .run(reason.trim() || "rechazado en revisión", this.clock().toISOString(), row.source_id);
+    return { ok: true, affected: Number(result.changes) };
+  }
+
+  guardarPerfilWhatsApp(
+    e164: string,
+    profile: WhatsAppBusinessProfile,
+  ): ReviewMutationResult {
+    const result = this.db
+      .prepare(
+        `update prospect_metadata
+         set wa_description = ?, wa_category = ?, wa_address = ?,
+             wa_websites = ?, wa_checked_at = ?
+         where e164 = ?`,
+      )
+      .run(
+        profile.description.trim() || null,
+        profile.category,
+        profile.address,
+        JSON.stringify(profile.websites),
+        this.clock().toISOString(),
+        e164,
+      );
+    return Number(result.changes) === 0
+      ? { ok: false, reason: "prospecto inexistente" }
+      : { ok: true, affected: 1 };
+  }
+
+  listarProspectos(
+    status: ApprovalStatus = "pending",
+    limit = 100,
+    filters: { vertical?: string; origin?: string } = {},
+  ): ProspectReviewRow[] {
+    const rows = this.db
+      .prepare(
+        `select
+           r.e164, r.source_id, r.name, r.district, r.classification, r.score,
+           r.has_website, r.review_count,
+           pm.vertical, pm.origin, pm.source_url, pm.notes,
+           pm.approval_status, pm.review_reason, pm.reviewed_at,
+           pm.wa_description, pm.wa_category, pm.wa_address,
+           pm.wa_websites, pm.wa_checked_at
+         from recipients r
+         join prospect_metadata pm on pm.e164 = r.e164
+         where pm.approval_status = ?
+           and r.source_id not like 'inbound:%'
+           and (? is null or pm.vertical = ?)
+           and (? is null or pm.origin = ?)
+         order by r.score desc nulls last, r.name asc
+         limit ?`,
+      )
+      .all(
+        status,
+        filters.vertical ?? null,
+        filters.vertical ?? null,
+        filters.origin ?? null,
+        filters.origin ?? null,
+        limit,
+      ) as Array<{
+      e164: string;
+      source_id: string;
+      name: string;
+      district: string;
+      classification: string;
+      score: number | null;
+      has_website: number | null;
+      review_count: number | null;
+      vertical: string;
+      origin: string;
+      source_url: string | null;
+      notes: string | null;
+      approval_status: ApprovalStatus;
+      review_reason: string | null;
+      reviewed_at: string | null;
+      wa_description: string | null;
+      wa_category: string | null;
+      wa_address: string | null;
+      wa_websites: string | null;
+      wa_checked_at: string | null;
+    }>;
+
+    return rows.map((row) => ({
+      e164: row.e164,
+      sourceId: row.source_id,
+      name: row.name,
+      district: row.district,
+      classification: row.classification,
+      score: row.score,
+      hasWebsite:
+        row.has_website === null ? null : row.has_website !== 0,
+      reviewCount: row.review_count,
+      vertical: row.vertical,
+      origin: row.origin,
+      sourceUrl: row.source_url,
+      notes: row.notes,
+      approvalStatus: row.approval_status,
+      reviewReason: row.review_reason,
+      reviewedAt: row.reviewed_at,
+      waDescription: row.wa_description,
+      waCategory: row.wa_category,
+      waAddress: row.wa_address,
+      waWebsites: this.parseWebsites(row.wa_websites),
+      waCheckedAt: row.wa_checked_at,
+    }));
+  }
+
+  private parseWebsites(value: string | null): string[] {
+    if (value === null) return [];
+    try {
+      const parsed: unknown = JSON.parse(value);
+      return Array.isArray(parsed)
+        ? parsed.filter((item): item is string => typeof item === "string")
+        : [];
+    } catch {
+      return [];
     }
   }
 
@@ -746,9 +1212,9 @@ export class Store {
    * Prospectos cuyo estado de web quedó en "no se sabe", del mejor score al peor.
    *
    * Son los que Places identificó razonablemente pero sin la confianza que hace
-   * falta para afirmar que no tienen web. Ya son contactables —el mensaje no
-   * afirma nada al respecto— pero puntúan por debajo de un verificado, así que
-   * resolverlos a mano es lo que más mueve el orden de la cola.
+   * falta para afirmar que no tienen web. No son contactables hasta resolver
+   * esa duda y aprobarlos: el gate nuevo falla cerrado para evitar afirmar o
+   * inferir algo comercial desde datos incompletos.
    */
   paraRevisar(limite: number): Array<{
     e164: string;
@@ -989,17 +1455,21 @@ export class Store {
   candidatosParaContactar(
     limite: number,
     desplazamiento = 0,
+    vertical?: string,
   ): Array<{ e164: string; score: number | null }> {
     return this.db
       .prepare(
         `select r.e164, r.score
          from recipients r
+         join prospect_metadata pm on pm.e164 = r.e164
          where r.suppressed = 0
            and r.human_takeover = 0
            and r.source_id not like 'inbound:%'
+           and pm.approval_status = 'approved'
+           and (? is null or pm.vertical = ?)
            -- Defensa en profundidad: el producto ES la web. Quien ya tiene una
            -- no se contacta aunque por algún camino haya quedado sin suprimir.
-           and coalesce(r.has_website, 0) = 0
+           and r.has_website = 0
            and not exists (
              select 1 from messages m
              where m.e164 = r.e164 and m.direction = 'in'
@@ -1008,7 +1478,7 @@ export class Store {
          order by r.score desc nulls last, r.e164 asc
          limit ? offset ?`,
       )
-      .all(limite, desplazamiento) as Array<{
+      .all(vertical ?? null, vertical ?? null, limite, desplazamiento) as Array<{
       e164: string;
       score: number | null;
     }>;

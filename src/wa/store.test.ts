@@ -6,7 +6,7 @@ import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 
 import type { ScoredProspect } from "../types.js";
-import { Store } from "./store.js";
+import { esSitioPropio, Store } from "./store.js";
 
 // Igual que en store.ts: vitest 2 no resuelve `node:sqlite` sin esto.
 const require = createRequire(import.meta.url);
@@ -263,7 +263,20 @@ describe("Store", () => {
     const enviado = new Date("2026-07-27T15:00:00.000Z");
     const store = new Store(":memory:", () => enviado);
     stores.push(store);
-    store.importRecipients([scored("A", "+51999111222")]);
+    const prospecto = scored("A", "+51999111222");
+    store.importRecipients([
+      {
+        ...prospecto,
+        web: { ...prospecto.web, verificadoSinWeb: true },
+      },
+    ]);
+    store.guardarPerfilWhatsApp("+51999111222", {
+      description: "Clínica A",
+      category: "Dentista",
+      address: "Miraflores",
+      websites: [],
+    });
+    expect(store.aprobarProspecto("+51999111222").ok).toBe(true);
 
     const id = store.claimSend("+51999111222", "first", "Hola");
     if (id === null) throw new Error("claim inesperado");
@@ -559,6 +572,13 @@ describe("revisión manual del tramo sin verificar", () => {
     const store = conPendiente();
 
     expect(store.resolverWeb("+51999111222", false, 18)).toBe(true);
+    store.guardarPerfilWhatsApp("+51999111222", {
+      description: "Clínica A",
+      category: "Dentista",
+      address: "Miraflores",
+      websites: [],
+    });
+    expect(store.aprobarProspecto("+51999111222").ok).toBe(true);
     expect(store.loadFichaProspecto("+51999111222")!.tieneWeb).toBe(false);
     expect(store.paraRevisar(10)).toEqual([]);
     expect(
@@ -651,6 +671,13 @@ describe("pendientes acotados y revisión que sobrevive al harvest", () => {
     };
     store.importRecipients([sinVerificar]);
     store.resolverWeb("+51999111222", false, 18);
+    store.guardarPerfilWhatsApp("+51999111222", {
+      description: "Clínica A",
+      category: "Dentista",
+      address: "Miraflores",
+      websites: [],
+    });
+    expect(store.aprobarProspecto("+51999111222").ok).toBe(true);
 
     store.importRecipients([sinVerificar]);
 
@@ -733,5 +760,190 @@ describe("la revisión es del establecimiento, no del teléfono", () => {
     expect(store.loadRecipientState("+51988222333").suppressed).toBe(true);
     expect(store.candidatosParaContactar(10)).toEqual([]);
     expect(store.paraRevisar(10)).toEqual([]);
+  });
+});
+
+describe("gate de aprobación de prospectos", () => {
+  const stores: Store[] = [];
+  afterEach(() => {
+    for (const store of stores.splice(0)) store.close();
+  });
+
+  function verificado(
+    sourceId = "A",
+    e164 = "+51999111222",
+  ): ScoredProspect {
+    const base = scored(sourceId, e164);
+    return {
+      ...base,
+      web: { ...base.web, verificadoSinWeb: true },
+    };
+  }
+
+  it("un harvest real nace pendiente y no puede salir por campaña", () => {
+    const store = new Store(":memory:");
+    stores.push(store);
+    store.importRecipients([verificado()]);
+
+    expect(store.listarProspectos("pending", 10)).toHaveLength(1);
+    expect(store.candidatosParaContactar(10)).toEqual([]);
+    expect(store.aprobarProspecto("+51999111222")).toEqual({
+      ok: false,
+      reason: "falta consultar el perfil actual de WhatsApp",
+    });
+  });
+
+  it("preflight más identidad confirmada habilita un lead manual de Meta", () => {
+    const store = new Store(":memory:");
+    stores.push(store);
+    store.upsertManualProspect({
+      e164: "+51999111222",
+      name: "Veterinaria Patitas",
+      district: "SURCO",
+      classification: "CLÍNICA VETERINARIA",
+      vertical: "veterinary",
+      origin: "meta",
+      sourceUrl: "https://www.facebook.com/ads/library/",
+      notes: "anuncio activo a WhatsApp",
+      score: 90,
+      verifiedWithoutWebsite: true,
+      approve: false,
+    });
+    store.guardarPerfilWhatsApp("+51999111222", {
+      description: "Patitas, atención veterinaria",
+      category: "Veterinario",
+      address: "Surco",
+      websites: ["https://instagram.com/patitas"],
+    });
+
+    expect(store.aprobarProspecto("+51999111222").ok).toBe(true);
+    expect(store.candidatosParaContactar(10)).toEqual([
+      { e164: "+51999111222", score: 90 },
+    ]);
+    expect(store.listarProspectos("approved", 10)[0]).toMatchObject({
+      vertical: "veterinary",
+      origin: "meta",
+      sourceUrl: "https://www.facebook.com/ads/library/",
+    });
+  });
+
+  it("un sitio propio encontrado en WhatsApp bloquea la aprobación", () => {
+    const store = new Store(":memory:");
+    stores.push(store);
+    store.importRecipients([verificado()]);
+    store.guardarPerfilWhatsApp("+51999111222", {
+      description: "Clínica A",
+      category: "Dentista",
+      address: "Miraflores",
+      websites: ["https://clinica-a.pe"],
+    });
+
+    expect(store.aprobarProspecto("+51999111222")).toEqual({
+      ok: false,
+      reason: "el perfil de WhatsApp muestra un sitio web propio",
+    });
+    expect(store.candidatosParaContactar(10)).toEqual([]);
+  });
+
+  it("aprobar un teléfono rechaza los duplicados del establecimiento", () => {
+    const store = new Store(":memory:");
+    stores.push(store);
+    const base = verificado();
+    store.importRecipients([
+      {
+        ...base,
+        phones: [
+          { raw: "999111222", e164: "+51999111222", kind: "mobile" },
+          { raw: "988222333", e164: "+51988222333", kind: "mobile" },
+        ],
+      },
+    ]);
+    store.guardarPerfilWhatsApp("+51999111222", {
+      description: "Clínica A",
+      category: "Dentista",
+      address: "Miraflores",
+      websites: [],
+    });
+
+    expect(store.aprobarProspecto("+51999111222")).toEqual({
+      ok: true,
+      affected: 2,
+    });
+    expect(store.listarProspectos("approved", 10).map((row) => row.e164)).toEqual([
+      "+51999111222",
+    ]);
+    expect(store.listarProspectos("rejected", 10)[0]?.reviewReason).toContain(
+      "+51999111222",
+    );
+  });
+
+  it("los números de prueba siguen habilitados sin debilitar leads reales", () => {
+    const store = new Store(":memory:");
+    stores.push(store);
+    store.importRecipients([verificado("prueba:+51999111222")]);
+
+    expect(store.candidatosParaContactar(10)).toEqual([
+      { e164: "+51999111222", score: 80 },
+    ]);
+  });
+
+  it("filtra la cola por vertical para no mezclar cohortes", () => {
+    const store = new Store(":memory:");
+    stores.push(store);
+    const sinWeb = {
+      ...scored("base", "+51990000000").web,
+      verificadoSinWeb: true,
+    };
+    store.importRecipients([
+      scored("prueba:dental", "+51999111222", { web: sinWeb }),
+      scored("prueba:veterinary", "+51999222333", {
+        classification: "CLÍNICA VETERINARIA",
+        web: sinWeb,
+      }),
+    ]);
+
+    expect(store.candidatosParaContactar(10, 0, "dental")).toEqual([
+      { e164: "+51999111222", score: 80 },
+    ]);
+    expect(store.candidatosParaContactar(10, 0, "veterinary")).toEqual([
+      { e164: "+51999222333", score: 80 },
+    ]);
+  });
+
+  it("migra una base anterior dejando lo real pendiente", () => {
+    const dir = mkdtempSync(join(tmpdir(), "outreach-approval-"));
+    const filename = join(dir, "old.sqlite");
+    const db = new DatabaseSync(filename);
+    db.exec(`
+      create table recipients (
+        e164 text primary key, source_id text not null, name text not null,
+        district text not null, classification text not null, score integer,
+        suppressed integer not null default 0, suppressed_reason text,
+        human_takeover integer not null default 0, created_at text not null,
+        has_website integer, review_count integer
+      );
+      insert into recipients (
+        e164, source_id, name, district, classification, score, created_at,
+        has_website
+      ) values (
+        '+51999111222', '0001', 'Clínica vieja', 'SURCO',
+        'CENTRO ODONTOLOGICO', 80, '2026-07-01T00:00:00.000Z', 0
+      );
+    `);
+    db.close();
+
+    const store = new Store(filename);
+    stores.push(store);
+    expect(store.listarProspectos("pending", 10).map((row) => row.e164)).toEqual([
+      "+51999111222",
+    ]);
+    expect(store.candidatosParaContactar(10)).toEqual([]);
+  });
+
+  it("distingue una red social de un sitio propio", () => {
+    expect(esSitioPropio("https://instagram.com/clinica")).toBe(false);
+    expect(esSitioPropio("https://wa.me/51999111222")).toBe(false);
+    expect(esSitioPropio("clinica.pe")).toBe(true);
+    expect(esSitioPropio("texto que no es url")).toBe(false);
   });
 });

@@ -6,6 +6,7 @@ import {
   proto,
   useMultiFileAuthState,
   type WAMessage,
+  type WABusinessProfile,
   type WASocket,
 } from "baileys";
 import type { ILogger } from "baileys/lib/Utils/logger.js";
@@ -49,14 +50,39 @@ export type EnvioManualHandler = (
   at: Date,
 ) => void;
 
+export interface PerfilNegocioWhatsApp {
+  description: string;
+  category: string | null;
+  address: string | null;
+  websites: string[];
+}
+
+export type ConsultaWhatsApp =
+  | { exists: false; profile: null }
+  | { exists: true; profile: PerfilNegocioWhatsApp | null };
+
 export interface WaClient {
   sendText(e164: string, body: string): Promise<string>;
+  /** Consulta de solo lectura; no abre conversación ni envía un mensaje. */
+  getBusinessProfile(e164: string): Promise<ConsultaWhatsApp>;
   onInbound(callback: InboundHandler): void;
   onAck(callback: AckHandler): void;
   onFatal(callback: FatalHandler): void;
   onEnvioManual(callback: EnvioManualHandler): void;
   start(): Promise<void>;
   stop(): Promise<void>;
+}
+
+export function normalizarPerfilNegocio(
+  profile: WABusinessProfile | void,
+): PerfilNegocioWhatsApp | null {
+  if (profile === undefined) return null;
+  return {
+    description: profile.description?.trim() ?? "",
+    category: profile.category?.trim() || null,
+    address: profile.address?.trim() || null,
+    websites: [...new Set(profile.website.map((site) => site.trim()).filter(Boolean))],
+  };
 }
 
 /** Dónde vive la sesión. Perderla obliga a escanear el QR de nuevo. */
@@ -377,6 +403,28 @@ export class BaileysClient implements WaClient {
     }
     this.recordarPropio(waMessageId);
     return waMessageId;
+  }
+
+  async getBusinessProfile(
+    e164: string,
+  ): Promise<ConsultaWhatsApp> {
+    const socket = this.socket;
+    if (socket === null) {
+      throw new Error("getBusinessProfile antes de start(): no hay sesión");
+    }
+    if (!/^\+\d{8,15}$/.test(e164)) {
+      throw new Error(`E.164 inválido: ${e164}`);
+    }
+
+    const encontrados = await socket.onWhatsApp(e164.slice(1));
+    const contacto = encontrados?.find((candidate) => candidate.exists);
+    if (contacto === undefined) return { exists: false, profile: null };
+    return {
+      exists: true,
+      profile: normalizarPerfilNegocio(
+        await socket.getBusinessProfile(contacto.jid),
+      ),
+    };
   }
 
   private recordarPropio(waMessageId: string): void {

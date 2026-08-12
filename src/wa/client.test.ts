@@ -8,9 +8,37 @@ import {
   e164DesdeJid,
   esperaReconexion,
   eventoDesdeMensaje,
+  normalizarPerfilNegocio,
   textoDeMensaje,
   tipoDeMensaje,
 } from "./client.js";
+
+describe("perfil comercial de WhatsApp", () => {
+  it("normaliza campos y elimina links repetidos", () => {
+    expect(
+      normalizarPerfilNegocio({
+        description: "  Clínica Patitas  ",
+        email: undefined,
+        business_hours: {},
+        website: [
+          " https://instagram.com/patitas ",
+          "https://instagram.com/patitas",
+        ],
+        category: " Veterinario ",
+        address: " Surco ",
+      }),
+    ).toEqual({
+      description: "Clínica Patitas",
+      category: "Veterinario",
+      address: "Surco",
+      websites: ["https://instagram.com/patitas"],
+    });
+  });
+
+  it("un número sin perfil comercial queda explícito", () => {
+    expect(normalizarPerfilNegocio(undefined)).toBeNull();
+  });
+});
 
 const Status = proto.WebMessageInfo.Status;
 

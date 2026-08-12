@@ -4,9 +4,8 @@
 //   npm run revisar -- --con-web +51...  tiene web: se suprime
 //   npm run revisar -- --sin-web +51...  confirmado sin web: sube de score
 //
-// Estos prospectos YA son contactables: el mensaje en frío no afirma nada sobre
-// su web. Lo que cambia al revisarlos es la prioridad — un verificado puntúa 40
-// y un "no se sabe" 22— así que esto es lo que más mueve el orden de la cola.
+// Estos prospectos NO son contactables hasta confirmar la web, consultar su
+// identidad actual en WhatsApp y aprobarlos desde `npm run prospectos`.
 //
 // El link va a la ficha de Google Maps por place_id, que es donde se ve el sitio
 // del negocio en dos segundos. Se abre en el navegador, no acá: verificar esto
@@ -70,7 +69,8 @@ try {
       console.info(`${marcar}: tiene web → suprimido, no entra a la cola.`);
     } else {
       console.info(
-        `${marcar}: verificado SIN web → +${DELTA_VERIFICAR} de score, sube en la cola.`,
+        `${marcar}: verificado SIN web → +${DELTA_VERIFICAR} de score. ` +
+          "Sigue pendiente hasta revisar su perfil de WhatsApp y aprobarlo.",
       );
     }
     process.exit(0);
