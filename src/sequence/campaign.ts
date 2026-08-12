@@ -2,7 +2,7 @@ import type { ContextoProspecto } from "../agent/prompt.js";
 import type { ProveedorLLM } from "../llm/port.js";
 import type { WaClient } from "../wa/client.js";
 import { canContact, canSendNow, nextGapSeconds } from "../wa/safety.js";
-import { attemptSend } from "../wa/send.js";
+import { attemptSend, attemptSendImage } from "../wa/send.js";
 import type { Store } from "../wa/store.js";
 import type { SafetyConfig } from "../wa/types.js";
 import { auditarMensaje } from "./auditoria.js";
@@ -12,12 +12,20 @@ import {
   type PasoCampana,
 } from "./compose.js";
 import { normalizarNombre, rubroNatural } from "./normalizar.js";
+import {
+  captionVisual,
+  type VisualAprobado,
+} from "./visual.js";
 
 const MAX_POR_DEFECTO = 20;
 
 export interface OpcionesTanda {
   max?: number;
   dryRun?: boolean;
+  /** Restringe la tanda al paso indicado sin rellenar el cupo con otros pasos. */
+  paso?: PasoCampana;
+  /** Excluye aperturas y deja entrar únicamente follow-ups que ya correspondan. */
+  soloFollowUps?: boolean;
   /** Restringe la tanda a una cohorte comercial sin mezclar rubros. */
   vertical?: string;
   /**
@@ -28,13 +36,23 @@ export interface OpcionesTanda {
    * está en la cola, la tanda no manda nada, que es el resultado correcto.
    */
   solo?: string;
+  /** Permite apuntar una tanda a una lista explícita sin mezclar la cola. */
+  solos?: readonly string[];
+  /**
+   * Cohorte multimedia aprobada explícitamente. Cuando existe, la tanda se
+   * restringe a sus números y nunca degrada silenciosamente a texto.
+   */
+  visuales?: ReadonlyMap<string, VisualAprobado>;
 }
 
 export interface MensajeCompuesto {
   e164: string;
   nombre: string;
   paso: PasoCampana;
+  intencionApertura: IntencionApertura | "visual";
   texto: string;
+  tipo: "text" | "image";
+  imagen?: string;
 }
 
 export interface ResumenTanda {
@@ -62,7 +80,7 @@ type CampaignStore = Pick<
 export interface DependenciasCampana {
   store: CampaignStore;
   proveedor: ProveedorLLM;
-  client: Pick<WaClient, "sendText">;
+  client: Pick<WaClient, "sendText" | "sendImage">;
   config: SafetyConfig;
   now: () => Date;
   sleep: (milliseconds: number) => Promise<void>;
@@ -152,6 +170,11 @@ export async function ejecutarTanda(
   // así que un tope basado en `enviados` no se alcanzaría nunca y la tanda
   // compondría contra toda la lista.
   let producidos = 0;
+  // La variante comercial se asigna solo a quienes realmente llegan al
+  // compositor. Los destinatarios saltados por cadencia no deben desplazar la
+  // rotación: si no, una cohorte nueva puede recibir dos veces `modelo` solo
+  // porque había diez conversaciones viejas delante en la cola.
+  let aperturasAsignadas = 0;
   // Aperturas compuestas en ESTA tanda. aperturasRecientes solo conoce lo ya
   // enviado, así que sin esto dos prospectos seguidos reciben la misma apertura
   // — y en dry-run, donde no se persiste nada, el mecanismo de variedad no
@@ -165,9 +188,12 @@ export async function ejecutarTanda(
   const filtrar = (
     lista: readonly { e164: string; score: number | null }[],
   ): Array<{ e164: string; score: number | null }> =>
-    opts.solo === undefined
-      ? [...lista]
-      : lista.filter((candidato) => candidato.e164 === opts.solo);
+    lista.filter(
+      (candidato) =>
+        (opts.solo === undefined || candidato.e164 === opts.solo) &&
+        (opts.solos === undefined || opts.solos.includes(candidato.e164)) &&
+        (opts.visuales === undefined || opts.visuales.has(candidato.e164)),
+    );
   let pagina = deps.store.candidatosParaContactar(
     TAMANO_PAGINA,
     desplazamiento,
@@ -187,7 +213,6 @@ export async function ejecutarTanda(
       resumen.motivoTerminacion = `alcanzado el máximo de la tanda (${max})`;
       return resumen;
     }
-    const indiceCandidato = evaluados;
     evaluados += 1;
     const ahora = deps.now();
     const salud = deps.store.loadAccountHealth(ahora);
@@ -235,6 +260,20 @@ export async function ejecutarTanda(
       );
       continue;
     }
+    if (opts.soloFollowUps === true && paso === "first") {
+      resumen.saltadosPorDestinatario += 1;
+      deps.log?.(
+        `${candidato.e164} saltado: modo solo follow-ups, no se abren chats nuevos`,
+      );
+      continue;
+    }
+    if (opts.paso !== undefined && paso !== opts.paso) {
+      resumen.saltadosPorDestinatario += 1;
+      deps.log?.(
+        `${candidato.e164} saltado: paso actual ${paso}, filtro ${opts.paso}`,
+      );
+      continue;
+    }
 
     const ficha = deps.store.loadFichaProspecto(candidato.e164);
     if (ficha === null) {
@@ -245,11 +284,73 @@ export async function ejecutarTanda(
       continue;
     }
 
+    const visual = opts.visuales?.get(candidato.e164);
+    if (visual !== undefined) {
+      if (visual.paso !== paso) {
+        resumen.saltadosPorDestinatario += 1;
+        deps.log?.(
+          `${candidato.e164} saltado: visual aprobado para ${visual.paso}, ` +
+            `pero el paso actual es ${paso}`,
+        );
+        continue;
+      }
+
+      const textoVisual = captionVisual(
+        visual.nombre ?? ficha.nombre,
+        visual.paso,
+        visual.nombre !== undefined,
+      );
+      if (opts.dryRun === true) {
+        resumen.mensajesCompuestos.push({
+          e164: candidato.e164,
+          nombre: normalizarNombre(ficha.nombre),
+          paso,
+          intencionApertura: "visual",
+          texto: textoVisual,
+          tipo: "image",
+          imagen: visual.ruta,
+        });
+        producidos += 1;
+        continue;
+      }
+
+      const resultadoVisual = await attemptSendImage(
+        {
+          store: deps.store,
+          client: deps.client,
+          config: deps.config,
+          now: deps.now,
+        },
+        candidato.e164,
+        visual.imagen,
+        textoVisual,
+        paso,
+      );
+      if (!resultadoVisual.allow) {
+        deps.log?.(`${candidato.e164} no se envió: ${resultadoVisual.reason}`);
+        continue;
+      }
+
+      resumen.enviados += 1;
+      producidos += 1;
+      deps.log?.(`${candidato.e164} enviado (${paso}, imagen 16:9)`);
+      if (producidos < max) {
+        await deps.sleep(nextGapSeconds(deps.config, deps.random) * 1_000);
+      }
+      continue;
+    }
+
     const historialPrevio = deps.store.mensajesEnviados(candidato.e164);
     const aperturasRecientes = [
       ...aperturasDeLaTanda,
       ...deps.store.aperturasRecientes(15),
     ];
+    const intencion = intencionParaIndice(aperturasAsignadas);
+    aperturasAsignadas += 1;
+    // Si una forma falla, el siguiente intento también ve esa salida como
+    // bloqueada. Solo pasarle los mensajes históricos no bastaba: el modelo
+    // podía repetir tres veces la misma apertura dentro del propio candidato.
+    const aperturasBloqueadas = [...aperturasRecientes];
     let textoAprobado: string | null = null;
     for (let intento = 0; intento < MAX_INTENTOS_AUDITORIA; intento += 1) {
       const composicion = await componerMensaje(
@@ -257,8 +358,8 @@ export async function ejecutarTanda(
         contextoDe(ficha),
         paso,
         historialPrevio,
-        intencionParaIndice(indiceCandidato + intento),
-        aperturasRecientes,
+        intencion,
+        aperturasBloqueadas,
       );
       if (!composicion.ok) {
         resumen.fallosComposicion += 1;
@@ -270,8 +371,9 @@ export async function ejecutarTanda(
 
       const auditoria = auditarMensaje(composicion.texto, {
         clasificacion: ficha.clasificacion,
-        aperturasRecientes,
+        aperturasRecientes: aperturasBloqueadas,
         paso,
+        intencionApertura: intencion,
       });
       if (auditoria.ok) {
         textoAprobado = composicion.texto;
@@ -279,9 +381,10 @@ export async function ejecutarTanda(
       }
 
       const motivo = auditoria.motivos.join("; ");
+      aperturasBloqueadas.unshift(composicion.texto.slice(0, 80));
       if (intento + 1 < MAX_INTENTOS_AUDITORIA) {
         deps.log?.(
-          `${candidato.e164} no pasó auditoría (${motivo}); recomponiendo con otra apertura`,
+          `${candidato.e164} no pasó auditoría (${motivo}); recomponiendo la misma intención con otra forma`,
         );
       } else {
         resumen.fallosComposicion += 1;
@@ -297,7 +400,9 @@ export async function ejecutarTanda(
         e164: candidato.e164,
         nombre: normalizarNombre(ficha.nombre),
         paso,
+        intencionApertura: intencion,
         texto: textoAprobado,
+        tipo: "text",
       });
       aperturasDeLaTanda.unshift(textoAprobado.slice(0, 80));
       producidos += 1;

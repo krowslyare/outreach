@@ -6,7 +6,14 @@
 import "./env.js";
 
 import { crearProveedor, modeloAnunciado } from "../llm/index.js";
+import {
+  esVerticalId,
+  VERTICAL_IDS,
+  type VerticalId,
+} from "../prospects/verticals.js";
 import { ejecutarTanda } from "../sequence/campaign.js";
+import type { PasoCampana } from "../sequence/compose.js";
+import { cargarVisualesAprobados } from "../sequence/visual.js";
 import { createWaClient, type WaClient } from "../wa/client.js";
 import {
   atenderNumero,
@@ -17,22 +24,37 @@ import {
 import { crearAgrupador } from "../orquestador/rafaga.js";
 import { hardKill } from "../wa/safety.js";
 import { Store } from "../wa/store.js";
-import { DEFAULT_SAFETY_CONFIG } from "../wa/types.js";
+import {
+  DEFAULT_SAFETY_CONFIG,
+  type SafetyConfig,
+} from "../wa/types.js";
 
 interface Argumentos {
   max?: number;
   dryRun: boolean;
+  paso?: PasoCampana;
   solo?: string;
+  solos?: readonly string[];
   escuchar: boolean;
   sinTanda: boolean;
+  soloFollowUps: boolean;
+  vertical?: VerticalId;
+  visuales?: string;
 }
 
 function parseArgs(args: readonly string[]): Argumentos {
   let max: number | undefined;
   let dryRun = false;
-  let solo: string | undefined;
+  let paso: PasoCampana | undefined;
+  const solos: string[] = [];
   let escuchar = false;
   let sinTanda = false;
+  // Bloqueo operativo vigente desde la primera restricción de WhatsApp:
+  // ninguna ejecución normal puede abrir chats nuevos hasta que el dueño
+  // autorice explícitamente levantarlo y se cambie esta política.
+  let soloFollowUps = true;
+  let vertical: VerticalId | undefined;
+  let visuales: string | undefined;
 
   for (let indice = 0; indice < args.length; indice += 1) {
     const argumento = args[indice]!;
@@ -50,6 +72,51 @@ function parseArgs(args: readonly string[]): Argumentos {
       escuchar = true;
       continue;
     }
+    if (argumento === "--solo-followups") {
+      soloFollowUps = true;
+      continue;
+    }
+
+    const pasoInline = argumento.startsWith("--paso=")
+      ? argumento.slice("--paso=".length)
+      : undefined;
+    if (argumento === "--paso" || pasoInline !== undefined) {
+      const raw = pasoInline ?? args[indice + 1];
+      if (pasoInline === undefined) indice += 1;
+      if (raw !== "first" && raw !== "fu1" && raw !== "fu2") {
+        throw new Error("--paso requiere uno de: first, fu1, fu2");
+      }
+      paso = raw;
+      continue;
+    }
+
+    const visualesInline = argumento.startsWith("--visuales=")
+      ? argumento.slice("--visuales=".length)
+      : undefined;
+    if (argumento === "--visuales" || visualesInline !== undefined) {
+      const raw = visualesInline ?? args[indice + 1];
+      if (visualesInline === undefined) indice += 1;
+      if (raw === undefined || raw.trim() === "") {
+        throw new Error("--visuales requiere la ruta a un manifest.json aprobado");
+      }
+      visuales = raw;
+      continue;
+    }
+
+    const verticalInline = argumento.startsWith("--vertical=")
+      ? argumento.slice("--vertical=".length)
+      : undefined;
+    if (argumento === "--vertical" || verticalInline !== undefined) {
+      const raw = verticalInline ?? args[indice + 1];
+      if (verticalInline === undefined) indice += 1;
+      if (raw === undefined || !esVerticalId(raw)) {
+        throw new Error(
+          `--vertical requiere uno de: ${VERTICAL_IDS.join(", ")}`,
+        );
+      }
+      vertical = raw;
+      continue;
+    }
 
     const soloInline = argumento.startsWith("--solo=")
       ? argumento.slice("--solo=".length)
@@ -62,7 +129,7 @@ function parseArgs(args: readonly string[]): Argumentos {
           "--solo requiere un móvil peruano en E.164, por ejemplo --solo +51931845435",
         );
       }
-      solo = raw;
+      solos.push(raw);
       continue;
     }
 
@@ -91,8 +158,25 @@ function parseArgs(args: readonly string[]): Argumentos {
         "así que no hay nada que escuchar.",
     );
   }
+  if (sinTanda && visuales !== undefined) {
+    throw new Error("--visuales no tiene efecto con --sin-tanda");
+  }
+  if (soloFollowUps && paso === "first") {
+    throw new Error("--solo-followups no puede combinarse con --paso first");
+  }
 
-  return { max, dryRun, solo, escuchar, sinTanda };
+  return {
+    max,
+    dryRun,
+    paso,
+    solo: solos.length === 1 ? solos[0] : undefined,
+    solos: solos.length > 0 ? solos : undefined,
+    escuchar,
+    sinTanda,
+    soloFollowUps,
+    vertical,
+    visuales,
+  };
 }
 
 /**
@@ -119,7 +203,46 @@ function delay(milliseconds: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, milliseconds));
 }
 
+/**
+ * libsignal 2.0 imprime `SessionEntry` completo al cerrar una sesión de cifrado,
+ * incluyendo claves privadas efímeras. No es un log útil para operar el bot y
+ * termina dejando material criptográfico en terminales y recolectores de logs.
+ *
+ * Se filtra solo esa firma exacta y se devuelve un restaurador para no dejar
+ * `console.info` alterado después de cerrar WhatsApp.
+ */
+function ocultarLogsSensiblesLibsignal(): () => void {
+  const original = console.info;
+  console.info = (...args: unknown[]): void => {
+    if (
+      args[0] === "Closing session:" ||
+      args[0] === "Removing old closed session:"
+    ) {
+      return;
+    }
+    original(...args);
+  };
+  return () => {
+    console.info = original;
+  };
+}
+
 const argumentos = parseArgs(process.argv.slice(2));
+if (argumentos.soloFollowUps && !argumentos.sinTanda) {
+  console.info(
+    "MODO SOLO FOLLOW-UPS: no se abrirán chats nuevos hasta nuevo aviso.",
+  );
+}
+const visuales =
+  argumentos.visuales === undefined
+    ? undefined
+    : cargarVisualesAprobados(argumentos.visuales);
+if (visuales !== undefined) {
+  console.info(
+    `Cohorte visual aprobada: ${visuales.size} destinatario(s). ` +
+      "La tanda no considerará números fuera del manifiesto.",
+  );
+}
 // Dos proveedores porque son dos trabajos distintos: componer el mensaje en
 // frío —donde la calidad es lo que evita que te bloqueen— y conversar, donde
 // pesa más seguir las reglas duras. Ver src/llm/index.ts.
@@ -139,9 +262,10 @@ const agrupador = crearAgrupador();
 // se exige explícitamente en vez de fallar recién cuando alguien esté caliente.
 const numeroHumano = process.env.NUMERO_HUMANO?.trim();
 let wa: WaClient | null = null;
+let restaurarConsoleInfo: (() => void) | null = null;
 // Se define recién cuando hay sesión de WhatsApp: sin cliente no hay a quién
 // responderle, y un dry-run no debe poder llamar al agente por accidente.
-let depsConversacion: () => ConversacionDeps = () => {
+let depsConversacion: (configConversacion?: SafetyConfig) => ConversacionDeps = () => {
   throw new Error("no hay sesión de WhatsApp: no se puede atender inbound");
 };
 
@@ -151,8 +275,9 @@ let depsConversacion: () => ConversacionDeps = () => {
 // tampoco protege de nada. La condición la resuelve el store —source_id de
 // prueba— y no un flag suelto, así que la excusa no se puede invocar sobre un
 // prospecto real ni por error de tipeo.
+const soloDePrueba = argumentos.solo;
 const esPrueba =
-  argumentos.solo !== undefined && store.esDestinatarioDePrueba(argumentos.solo);
+  soloDePrueba !== undefined && store.esDestinatarioDePrueba(soloDePrueba);
 const config = esPrueba
   ? {
       ...DEFAULT_SAFETY_CONFIG,
@@ -165,7 +290,7 @@ const config = esPrueba
   : DEFAULT_SAFETY_CONFIG;
 if (esPrueba) {
   console.info(
-    `MODO PRUEBA hacia ${argumentos.solo}: sin ventana horaria y con separación ` +
+    `MODO PRUEBA hacia ${soloDePrueba}: sin ventana horaria y con separación ` +
       `mínima corta. El kill switch, la supresión y el takeover siguen aplicando.`,
   );
 } else if (argumentos.solo !== undefined) {
@@ -176,7 +301,7 @@ if (esPrueba) {
 }
 
 try {
-  let client: Pick<WaClient, "sendText">;
+  let client: Pick<WaClient, "sendText" | "sendImage">;
   if (argumentos.dryRun) {
     console.info(
       "DRY RUN: se compondrán mensajes, pero WhatsApp no se iniciará ni enviará nada.",
@@ -186,6 +311,9 @@ try {
         // Si el runner rompe el contrato del dry-run, fallamos cerrado en vez
         // de crear accidentalmente una sesión real de WhatsApp.
         throw new Error("dry-run intentó enviar un mensaje");
+      },
+      sendImage: async () => {
+        throw new Error("dry-run intentó enviar una imagen");
       },
     };
   } else {
@@ -217,15 +345,16 @@ try {
 
     wa = createWaClient();
     const waActivo = wa;
+    restaurarConsoleInfo = ocultarLogsSensiblesLibsignal();
     // Una sola definición para los dos caminos que llaman al agente —el
     // entrante en vivo y el barrido de pendientes— porque si divergen, uno de
     // los dos corre con otras puertas de seguridad y nadie lo nota.
-    depsConversacion = () => ({
+    depsConversacion = (configConversacion = config) => ({
       store,
       proveedor: proveedorAgente,
       enviar: (destino: string, texto: string) => waActivo.sendText(destino, texto),
       handoff: { numeroHumano },
-      config,
+      config: configConversacion,
       now: () => new Date(),
       log: (mensaje: string) => console.log(`[inbound] ${mensaje}`),
     });
@@ -238,7 +367,17 @@ try {
       // ejecuta el handoff. Con el de bajo nivel, un prospecto que responde
       // durante la tanda queda registrado y sin respuesta — y si quería
       // contratar, sin escalar.
-      const deps = depsConversacion();
+      //
+      // El horario relajado de una prueba SOLO pertenece al número indicado en
+      // --solo. El socket también oye a todos los contactos históricos; usar
+      // `config` sin distinguirlos haría que un prospecto real que escriba a
+      // las 5am reciba respuesta automática porque casualmente había una prueba
+      // corriendo contra otro teléfono.
+      const configInbound =
+        esPrueba && evento.e164 === soloDePrueba
+          ? config
+          : DEFAULT_SAFETY_CONFIG;
+      const deps = depsConversacion(configInbound);
       // El registro es inmediato —opt-out e idempotencia no pueden esperar— y
       // solo la RESPUESTA se agrupa. Sin esto, tres mensajes seguidos del mismo
       // prospecto producían tres respuestas encadenadas: correctas y en orden,
@@ -296,15 +435,27 @@ try {
           random: Math.random,
           log: (mensaje) => console.info(mensaje),
         },
-        { max: argumentos.max, dryRun: argumentos.dryRun, solo: argumentos.solo },
+        {
+          max: argumentos.max,
+          dryRun: argumentos.dryRun,
+          paso: argumentos.paso,
+          soloFollowUps: argumentos.soloFollowUps,
+          solo: argumentos.solo,
+          solos: argumentos.solos,
+          vertical: argumentos.vertical,
+          visuales,
+        },
       );
 
   if (resumen === null) {
     console.info("Sin tanda: solo se queda escuchando.");
   } else if (argumentos.dryRun) {
     for (const mensaje of resumen.mensajesCompuestos) {
+      const media =
+        mensaje.tipo === "image" ? `\n[imagen 16:9: ${mensaje.imagen}]` : "";
       console.info(
-        `\n${mensaje.nombre} — ${mensaje.e164} [${mensaje.paso}]\n${mensaje.texto}`,
+        `\n${mensaje.nombre} — ${mensaje.e164} [${mensaje.paso}/${mensaje.intencionApertura}]` +
+          `${media}\n${mensaje.texto}`,
       );
     }
   }
@@ -339,7 +490,11 @@ try {
       if (barriendo) return;
       barriendo = true;
       try {
-        const resumen = await reintentarPendientes(depsConversacion());
+        // El barrido incluye todos los números pendientes, no solo el objetivo
+        // de --solo. Por eso nunca hereda el horario relajado del modo prueba.
+        const resumen = await reintentarPendientes(
+          depsConversacion(esPrueba ? DEFAULT_SAFETY_CONFIG : config),
+        );
         if (resumen.numeros > 0) {
           console.info(
             `[pendientes] ${resumen.numeros} número(s): ${resumen.respondidos} ` +
@@ -371,5 +526,6 @@ try {
   // dejaría a alguien que escribió sin respuesta y sin nada que lo indique.
   await agrupador.vaciar();
   if (wa !== null) await wa.stop();
+  restaurarConsoleInfo?.();
   store.close();
 }

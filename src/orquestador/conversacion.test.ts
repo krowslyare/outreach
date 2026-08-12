@@ -5,6 +5,7 @@ import type { ProveedorLLM, RespuestaLLM } from "../llm/port.js";
 import type { InboundEvent } from "../wa/client.js";
 import type { AccountHealth, RecipientState } from "../wa/types.js";
 import {
+  atenderNumero,
   manejarInbound,
   reintentarPendientes,
   type ConversacionDeps,
@@ -18,6 +19,7 @@ const FICHA: ContextoProspecto = {
   nombre: "Clínica Ejemplo",
   distrito: "Miraflores",
   clasificacion: "Centro odontológico",
+  vertical: "dental",
   tieneWeb: false,
   resenas: 18,
 };
@@ -112,6 +114,7 @@ function crearDobles(opciones: OpcionesDobles = {}) {
           nombre: e164,
           distrito: "",
           clasificacion: "INBOUND DESCONOCIDO",
+          vertical: null,
           tieneWeb: null,
           resenas: null,
         };
@@ -170,6 +173,52 @@ function crearDobles(opciones: OpcionesDobles = {}) {
 }
 
 describe("manejarInbound", () => {
+  it("no manda una respuesta vieja si llega otro mensaje mientras compone", async () => {
+    const { deps, store, enviar } = crearDobles({
+      pendientes: [{ e164: E164, waMessageId: "wa-primero", at: EN_HORARIO }],
+      historial: [{ direction: "in", body: "¿Me cuenta cómo funciona?" }],
+    });
+    let lecturas = 0;
+    vi.mocked(store.inboundsPendientes).mockImplementation((_limite, soloE164) => {
+      lecturas += 1;
+      const primero = { e164: E164, waMessageId: "wa-primero", at: EN_HORARIO };
+      const segundo = { e164: E164, waMessageId: "wa-segundo", at: EN_HORARIO };
+      const pendientes = lecturas === 1 ? [primero] : [primero, segundo];
+      return soloE164 === undefined
+        ? pendientes
+        : pendientes.filter((pendiente) => pendiente.e164 === soloE164);
+    });
+
+    await expect(atenderNumero(deps, E164)).resolves.toEqual({
+      accion: "diferido",
+      razon: "llegó otro mensaje mientras se componía la respuesta",
+    });
+
+    expect(enviar).not.toHaveBeenCalled();
+    expect(store.marcarInboundAtendido).not.toHaveBeenCalled();
+  });
+
+  it("cancela la respuesta si el humano toma el chat mientras el modelo compone", async () => {
+    const { deps, store, generar, enviar } = crearDobles({
+      pendientes: [{ e164: E164, waMessageId: "wa-takeover", at: EN_HORARIO }],
+      historial: [{ direction: "in", body: "Hola, buenas tardes" }],
+    });
+    let lecturasEstado = 0;
+    vi.mocked(store.loadRecipientState).mockImplementation(() => ({
+      ...ESTADO,
+      humanTakeover: lecturasEstado++ > 0,
+    }));
+
+    await expect(atenderNumero(deps, E164)).resolves.toEqual({
+      accion: "ignorado",
+      razon: "conversación tomada por humano",
+    });
+
+    expect(generar).toHaveBeenCalledTimes(1);
+    expect(enviar).not.toHaveBeenCalled();
+    expect(store.recordOutboundLibre).not.toHaveBeenCalled();
+  });
+
   it("suprime un opt-out sin consultar al agente ni enviar", async () => {
     const { deps, store, generar, enviar } = crearDobles();
     const info = vi.spyOn(console, "info").mockImplementation(() => undefined);
@@ -190,6 +239,26 @@ describe("manejarInbound", () => {
     expect(generar).not.toHaveBeenCalled();
     expect(enviar).not.toHaveBeenCalled();
     info.mockRestore();
+  });
+
+  it("sella un mensaje vacío sin consultar al agente ni hacer handoff", async () => {
+    const { deps, store, generar, enviar } = crearDobles();
+
+    await expect(manejarInbound(deps, eventoInbound(""))).resolves.toEqual({
+      accion: "ignorado",
+      razon: "mensaje sin contenido legible",
+    });
+
+    expect(store.recordInbound).toHaveBeenCalledWith(
+      E164,
+      "",
+      EN_HORARIO,
+      expect.objectContaining({ clase: "humano" }),
+    );
+    expect(store.marcarInboundAtendido).toHaveBeenCalled();
+    expect(generar).not.toHaveBeenCalled();
+    expect(enviar).not.toHaveBeenCalled();
+    expect(store.setHumanTakeover).not.toHaveBeenCalled();
   });
 
   it("ignora un número sin ficha porque responder sin contexto sería improvisar", async () => {

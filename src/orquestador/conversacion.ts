@@ -191,7 +191,11 @@ async function atenderYSaldar(
     const pendientes = deps.store.inboundsPendientes(200, e164);
     if (pendientes.length === 0) return { accion: "duplicado" } as const;
 
-    const resultado = await atender(deps, e164);
+    const resultado = await atender(
+      deps,
+      e164,
+      new Set(pendientes.map((pendiente) => pendiente.waMessageId)),
+    );
     if (cerroElCiclo(resultado)) {
       // Se saldan TODOS, no una muestra: `atender` compuso su respuesta con el
       // historial completo, así que cubre todo lo que estaba pendiente en este
@@ -237,6 +241,16 @@ export function ingerirInbound(
       resultado: { accion: "automatico", razon: inbound.motivo },
     };
   }
+  if (inbound.action === "empty") {
+    deps.log?.(
+      `inbound vacío de ${evento.e164}: registrado para revisión, sin responder ni escalar`,
+    );
+    deps.store.marcarInboundAtendido(evento.waMessageId, deps.now());
+    return {
+      atender: false,
+      resultado: { accion: "ignorado", razon: "mensaje sin contenido legible" },
+    };
+  }
   return { atender: true };
 }
 
@@ -264,7 +278,12 @@ async function resolver(
   // los tests de este archivo seguirían en verde igual.
   const ingesta = ingerirInbound(deps, evento);
   if (!ingesta.atender) return ingesta.resultado!;
-  return atender(deps, evento.e164);
+  const pendientes = deps.store.inboundsPendientes(200, evento.e164);
+  return atender(
+    deps,
+    evento.e164,
+    new Set(pendientes.map((pendiente) => pendiente.waMessageId)),
+  );
 }
 
 /**
@@ -280,6 +299,7 @@ async function resolver(
 async function atender(
   deps: ConversacionDeps,
   e164: string,
+  inboundIdsAlComenzar?: ReadonlySet<string>,
 ): Promise<ResultadoConversacion> {
   // 2. Un número que no es de campaña no se contesta solo. Puede ser cualquiera
   //    escribiendo al número; el agente no tiene contexto y responder sería
@@ -332,6 +352,46 @@ async function atender(
   // El inbound ya quedó registrado en el paso 1, así que el último turno es el
   // del prospecto — que es justo lo que decidirRespuesta exige.
   const decision = await decidirRespuesta(deps.proveedor, ficha, historial);
+
+  // Si alguien escribió mientras el LLM estaba componiendo, el saliente que
+  // estamos a punto de mandar ya quedó viejo. No lo enviamos: dejamos los
+  // entrantes sin saldar y el agrupador volverá a ejecutar con el historial
+  // completo. Sin esta comprobación, el primer mensaje de una ráfaga podía
+  // salir después del segundo y el siguiente intento veía un saliente como
+  // último turno del chat.
+  if (
+    inboundIdsAlComenzar !== undefined &&
+    deps.store
+      .inboundsPendientes(200, e164)
+      .some((pendiente) => !inboundIdsAlComenzar.has(pendiente.waMessageId))
+  ) {
+    deps.log?.(
+      `respuesta a ${e164} diferida: llegó otro mensaje mientras se componía`,
+    );
+    return {
+      accion: "diferido",
+      razon: "llegó otro mensaje mientras se componía la respuesta",
+    };
+  }
+
+  // El humano puede tomar la conversación MIENTRAS el modelo compone. La
+  // comprobación inicial no cubre esa carrera: sin releer acá, una respuesta
+  // ya preparada sale encima del mensaje manual y deja una secuencia que se ve
+  // inequívocamente automatizada. Supresión y puertas de cuenta se vuelven a
+  // medir por la misma razón: nada decidido antes del LLM autoriza un envío
+  // cuando el estado cambió durante la llamada.
+  const estadoAntesDeEnviar = deps.store.loadRecipientState(e164);
+  if (estadoAntesDeEnviar.humanTakeover) {
+    return { accion: "ignorado", razon: "conversación tomada por humano" };
+  }
+  if (estadoAntesDeEnviar.suppressed) {
+    return { accion: "ignorado", razon: "destinatario suprimido" };
+  }
+  const puertaAntesDeEnviar = puedeResponder(deps, deps.now());
+  if (!puertaAntesDeEnviar.ok) {
+    deps.log?.(`respuesta a ${e164} diferida: ${puertaAntesDeEnviar.razon}`);
+    return { accion: "diferido", razon: puertaAntesDeEnviar.razon };
+  }
 
   // 6. Escalar y perder van al handoff, que pone el lock antes de nada.
   if (decision.kind !== "responder") {

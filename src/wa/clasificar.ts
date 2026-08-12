@@ -29,6 +29,21 @@ export type ClaseInbound = "automatico" | "humano";
 export const VENTANA_AUTOMATICA_MS = 60_000;
 
 /**
+ * Algunas automatizaciones empresariales no contestan de inmediato. Solo se
+ * usa esta ventana mayor con plantillas observadas y mucho más específicas;
+ * ampliar la ventana general convertiría respuestas humanas en robots.
+ */
+export const VENTANA_AUTOMATICA_TARDIA_MS = 5 * 60_000;
+
+/**
+ * Una plantilla con varias señales empresariales inequívocas puede aparecer
+ * mucho después si WhatsApp o el teléfono del negocio la dejó en cola.
+ * Se limita a un día —igual que la recuperación offline del cliente— para no
+ * reinterpretar como robot una conversación humana antigua.
+ */
+export const VENTANA_AUTOMATICA_INEQUIVOCA_MS = 24 * 60 * 60_000;
+
+/**
  * Frases de plantilla de bienvenida y de ausencia.
  *
  * No pretenden cubrir todas las redacciones posibles: lo que no matchea cae en
@@ -38,7 +53,15 @@ export const VENTANA_AUTOMATICA_MS = 60_000;
 const PATRONES_PLANTILLA: readonly RegExp[] = [
   /gracias por (comunicarte|comunicarse|contactarnos|escribirnos|tu mensaje|su mensaje)/iu,
   /bienvenid[oa]s? a/iu,
+  // Observado en Clínica Dental Olympus: un menú comercial largo que llega a
+  // los dos segundos. Se exigen juntas la presentación de la asistente y la
+  // ficha para reservar; una recepcionista que escribe rápidamente "le saluda
+  // la asistente del doctor" sigue siendo humana si no pega el formulario.
+  /(te|le) saluda (la|el) asistente del (doctor|dr\.?)[\s\S]{0,2000}reserva tu cita enviando/iu,
   /en breve (te|le|los)? ?(atender|responder|contactar|escrib)/iu,
+  // Observado en Tempo Skin: segundo bloque de su flujo automático, enviado
+  // después de un botón interactivo vacío.
+  /en breve nos pondremos en contacto(?: contigo| con usted)?/iu,
   /(un|nuestro) asesor .{0,30}(atender|contactar|responder)/iu,
   /a la brevedad/iu,
   /(nuestro|el) horario de (atenci[oó]n|trabajo)/iu,
@@ -49,6 +72,36 @@ const PATRONES_PLANTILLA: readonly RegExp[] = [
   /(responderemos|te responderemos|le responderemos) (a la brevedad|apenas|en cuanto|lo antes)/iu,
   /este es un mensaje autom[aá]tico/iu,
   /mensaje autom[aá]tico/iu,
+];
+
+const PATRONES_PLANTILLA_TARDIA: readonly RegExp[] = [
+  // Observado en Free Smile a los 72 segundos: bienvenida, solicitud de datos
+  // y derivación a una web, todo en el mismo bloque. La combinación completa
+  // es lo bastante específica para no confundir un saludo humano tardío.
+  /(le|te) da la bienvenida[\s\S]{0,500}(nombre completo|visite nuestra web)/iu,
+  // Observado en Clínica Odontológica Los Pinos a los 134 segundos. Es la
+  // bienvenida estándar de WhatsApp Business: agradece el contacto, nombra al
+  // negocio y cierra con la pregunta genérica de atención. Las dos partes son
+  // necesarias; una persona que solo escribe "¿cómo podemos ayudarte?" sigue
+  // clasificándose como humana.
+  /gracias por (?:comunicarte|comunicarse|contactarnos|escribirnos) con[\s\S]{0,300}¿?c[oó]mo podemos ayudarte\??/iu,
+];
+
+const PATRONES_PLANTILLA_INEQUIVOCA: readonly RegExp[] = [
+  // Observado en Amorisa a los 87 minutos: bienvenida institucional, acuse y
+  // promesa explícita de un asesor. Ninguna de las frases por separado basta;
+  // la secuencia completa sí identifica un autorespondedor con alta confianza.
+  /bienvenid(?:o|a|o\(a\))s? a[\s\S]{0,800}gracias por escribirnos[\s\S]{0,800}en breve (?:uno de )?nuestros asesores responder[aá]/iu,
+  // Observado en Centro Estético Siluet a los 33 minutos: bienvenida
+  // empresarial tardía que agradece el contacto y devuelve la pregunta
+  // genérica "haznos saber cómo podemos ayudarte". Se exige la combinación
+  // completa para no convertir un simple "gracias" humano en automático.
+  /gracias por (?:comunicarte|comunicarse|contactarnos|escribirnos) con[\s\S]{0,300}(?:por favor,?\s+)?(?:haznos|h[aá]ganos|d[eé]janos|ind[ií]canos) saber c[oó]mo podemos ayudarte/iu,
+  // Observado en la misma conversación a los 9 minutos: aviso de ausencia
+  // empresarial que promete responder al regresar. La combinación completa
+  // (indisponibilidad + promesa explícita) evita clasificar como robot un
+  // humano que solo diga "ahora no puedo".
+  /en este momento no estamos disponibles[\s\S]{0,300}(?:te|le) responderemos[\s\S]{0,120}(?:regresemos|volvamos|estemos disponibles)/iu,
 ];
 
 /**
@@ -77,6 +130,36 @@ export interface Clasificacion {
 const HUMANO = (motivo: string): Clasificacion => ({ clase: "humano", motivo });
 
 export function clasificarInbound(senales: SenalesInbound): Clasificacion {
+  // Baileys entrega revocaciones y otros eventos internos como
+  // `protocolMessage`. No contienen texto que una persona haya escrito; si se
+  // dejan caer al agente, este puede continuar la conversación a ciegas (como
+  // ocurrió con un contacto que devolvió `[protocol]`). Se registran, pero no
+  // llaman al LLM ni cortan la cadencia.
+  if (senales.tipo === "protocol") {
+    return { clase: "automatico", motivo: "evento de protocolo de WhatsApp" };
+  }
+
+  // Algunos flujos de WhatsApp Business emiten un mensaje interactivo sin
+  // selección ni texto del usuario. Baileys lo expone como tipo `buttons` y el
+  // adaptador lo vuelve `[buttons]`. No es una persona pulsando una opción: no
+  // contiene id, etiqueta ni contenido elegible. Solo se ignora dentro de la
+  // misma ventana corta de un saliente; fuera de ella se conserva el sesgo
+  // seguro hacia humano.
+  if (
+    senales.tipo === "buttons" &&
+    senales.body.trim() === "[buttons]" &&
+    senales.ultimoOutboundAt !== null
+  ) {
+    const latenciaButtons =
+      senales.at.getTime() - senales.ultimoOutboundAt.getTime();
+    if (latenciaButtons >= 0 && latenciaButtons <= VENTANA_AUTOMATICA_MS) {
+      return {
+        clase: "automatico",
+        motivo: `evento buttons vacío a los ${Math.round(latenciaButtons / 1000)}s`,
+      };
+    }
+  }
+
   // Audio, imagen, sticker, ubicación, contacto: un mensaje de bienvenida es
   // texto. Cualquier otra cosa es actividad humana, y además el agente no puede
   // leerla, así que tiene que cortar la cadencia y quedar para revisión.
@@ -98,6 +181,33 @@ export function clasificarInbound(senales: SenalesInbound): Clasificacion {
   // el teléfono del prospecto y puede venir corrido respecto del nuestro. Ante
   // relojes que no concuerdan, no se clasifica como automático.
   if (latenciaMs < 0) return HUMANO("timestamp anterior al saliente");
+
+  const patronInequivoco = PATRONES_PLANTILLA_INEQUIVOCA.find((p) =>
+    p.test(senales.body),
+  );
+  if (
+    patronInequivoco !== undefined &&
+    latenciaMs <= VENTANA_AUTOMATICA_INEQUIVOCA_MS
+  ) {
+    return {
+      clase: "automatico",
+      motivo: `plantilla inequívoca ${patronInequivoco.source} a los ${Math.round(latenciaMs / 1000)}s`,
+    };
+  }
+
+  const patronTardio = PATRONES_PLANTILLA_TARDIA.find((p) =>
+    p.test(senales.body),
+  );
+  if (
+    patronTardio !== undefined &&
+    latenciaMs <= VENTANA_AUTOMATICA_TARDIA_MS
+  ) {
+    return {
+      clase: "automatico",
+      motivo: `plantilla tardía ${patronTardio.source} a los ${Math.round(latenciaMs / 1000)}s`,
+    };
+  }
+
   if (latenciaMs > VENTANA_AUTOMATICA_MS) {
     return HUMANO(`llegó ${Math.round(latenciaMs / 1000)}s después del saliente`);
   }

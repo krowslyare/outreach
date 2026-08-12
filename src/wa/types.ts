@@ -95,8 +95,10 @@ export const DEFAULT_SAFETY_CONFIG: SafetyConfig = {
   windowStartHour: 9,
   windowEndHour: 19,
   activeWeekdays: [1, 2, 3, 4, 5, 6],
-  minGapSeconds: 180,
-  maxGapSeconds: 900,
+  // Una tanda pequeña no debe tardar toda la jornada, pero tampoco salir como
+  // ráfaga. Entre 2 y 5 minutos completa 10 contactos en unos 20–45 minutos.
+  minGapSeconds: 120,
+  maxGapSeconds: 300,
   deviceRateDropPoints: 0.15,
   deviceRateMinSample: 30,
   followUpDays: [3, 7],

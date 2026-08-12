@@ -39,10 +39,34 @@ describe("auditarMensaje", () => {
     ).toEqual({ ok: true });
   });
 
-  it("no confunde un rubro natural nuevo con taxonomía de padrón", () => {
+  it("rechaza una falsa especialización en el rubro", () => {
     expect(
       auditarMensaje(
         "Ayudamos a clínicas veterinarias a presentar sus servicios.",
+        {
+          clasificacion: "CLÍNICAS VETERINARIAS",
+          aperturasRecientes: [],
+        },
+      ),
+    ).toEqual({
+      ok: false,
+      motivos: ["insinúa especialización o experiencia previa en el rubro"],
+    });
+    expect(
+      auditarMensaje(
+        "Diseñamos y mantenemos webs a medida para clínicas dentales.",
+        CONTEXTO,
+      ),
+    ).toEqual({
+      ok: false,
+      motivos: ["insinúa especialización o experiencia previa en el rubro"],
+    });
+  });
+
+  it("permite personalizar la propuesta para el negocio concreto", () => {
+    expect(
+      auditarMensaje(
+        "Tenemos una idea para Clínica Patitas: mostrar juntos sus servicios y horarios.",
         {
           clasificacion: "CLÍNICAS VETERINARIAS",
           aperturasRecientes: [],
@@ -108,6 +132,43 @@ describe("auditarMensaje", () => {
       ok: false,
       motivos: ["el primer contacto debe tener una sola pregunta (2)"],
     });
+  });
+
+  it("limita el primer contacto a 320 caracteres", () => {
+    expect(
+      auditarMensaje(`${"a".repeat(320)}?`, {
+        ...CONTEXTO,
+        paso: "first",
+      }),
+    ).toEqual({
+      ok: false,
+      motivos: ["el primer contacto supera 320 caracteres (321)"],
+    });
+  });
+
+  it("reserva mensualidad y pago inicial para la apertura modelo", () => {
+    const texto =
+      "Le escribo de Kurogrid. Diseñamos la web sin pago inicial por el desarrollo y la mantenemos por una mensualidad. ¿Le cuento?";
+
+    expect(
+      auditarMensaje(texto, {
+        ...CONTEXTO,
+        paso: "first",
+        intencionApertura: "permiso",
+      }),
+    ).toEqual({
+      ok: false,
+      motivos: [
+        "la apertura permiso repite el ángulo comercial reservado para modelo",
+      ],
+    });
+    expect(
+      auditarMensaje(texto, {
+        ...CONTEXTO,
+        paso: "first",
+        intencionApertura: "modelo",
+      }),
+    ).toEqual({ ok: true });
   });
 
   it("acepta un mensaje que no activa ninguna regla", () => {

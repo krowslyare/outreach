@@ -38,7 +38,11 @@ const ALLOW: SendVerdict = { allow: true };
  * conversaciones nuevas se mantenga.
  */
 const RAMP_LADDER: ReadonlyArray<{ untilDay: number; cap: number }> = [
-  { untilDay: 2, cap: 30 },
+  // La cuenta ya tenía cinco meses de uso y el día 2 cerró 31/31 salientes
+  // entregados sin kill switch. El dueño autorizó una segunda tanda controlada;
+  // 42 permite diez contactos nuevos después de las continuaciones humanas del
+  // día sin abrir de golpe el tope de 50.
+  { untilDay: 2, cap: 42 },
   { untilDay: 4, cap: 40 },
   { untilDay: 7, cap: 50 },
 ];
@@ -95,6 +99,67 @@ export function zonedParts(
   const weekday = asUtc.getUTCDay() === 0 ? 7 : asUtc.getUTCDay();
 
   return { hour: get("hour"), weekday };
+}
+
+function zonedDateParts(
+  now: Date,
+  timeZone: string,
+): { year: number; month: number; day: number; hour: number; minute: number } {
+  const parts = new Intl.DateTimeFormat("en-US", {
+    timeZone,
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+    hour: "2-digit",
+    minute: "2-digit",
+    hourCycle: "h23",
+  }).formatToParts(now);
+  const get = (type: string): number => {
+    const found = parts.find((part) => part.type === type)?.value;
+    if (found === undefined) throw new Error(`falta ${type} al formatear la fecha`);
+    return Number(found);
+  };
+  return {
+    year: get("year"),
+    month: get("month"),
+    day: get("day"),
+    hour: get("hour"),
+    minute: get("minute"),
+  };
+}
+
+function serialDiaLocal(now: Date, timeZone: string): number {
+  const { year, month, day } = zonedDateParts(now, timeZone);
+  return Math.floor(Date.UTC(year, month - 1, day) / 86_400_000);
+}
+
+/**
+ * Inicio del día local convertido a instante real.
+ *
+ * Intl no expone el offset de una zona directamente. Dos aproximaciones
+ * bastan incluso alrededor de cambios DST: se compara cómo se representa el
+ * candidato en la zona y se corrige la diferencia contra la medianoche local.
+ */
+function inicioDiaLocal(serial: number, timeZone: string): Date {
+  const fecha = new Date(serial * 86_400_000);
+  const objetivo = Date.UTC(
+    fecha.getUTCFullYear(),
+    fecha.getUTCMonth(),
+    fecha.getUTCDate(),
+  );
+  let candidato = objetivo;
+  for (let intento = 0; intento < 3; intento += 1) {
+    const local = zonedDateParts(new Date(candidato), timeZone);
+    const representado = Date.UTC(
+      local.year,
+      local.month - 1,
+      local.day,
+      local.hour,
+      local.minute,
+    );
+    candidato += objetivo - representado;
+  }
+  return new Date(candidato);
 }
 
 /** ¿La muestra de deviceRate alcanza para creerle? */
@@ -246,15 +311,20 @@ export function canContact(
     return DENY("estado inconsistente: hay follow-ups pero no hay fecha de contacto");
   }
 
-  const daysSinceFirst = Math.floor(
-    (now.getTime() - reference.getTime()) / 86_400_000,
-  );
-  if (daysSinceFirst < nextFollowUpDay) {
-    const retryAfter = new Date(
-      reference.getTime() + nextFollowUpDay * 86_400_000,
+  // Día comercial ordinal: el primer contacto es día 1. Así jueves/viernes/
+  // sábado son días 1/2/3 aunque el mensaje del jueves haya salido por la
+  // tarde. Medir 72 horas completas corría ese seguimiento al domingo y, por
+  // la pausa dominical, terminaba enviándolo recién el lunes.
+  const primerDia = serialDiaLocal(reference, config.timezone);
+  const diaActual = serialDiaLocal(now, config.timezone);
+  const diaCampana = diaActual - primerDia + 1;
+  if (diaCampana < nextFollowUpDay) {
+    const retryAfter = inicioDiaLocal(
+      primerDia + nextFollowUpDay - 1,
+      config.timezone,
     );
     return DENY(
-      `todavía no toca el follow-up ${recipient.followUpCount + 1} (día ${daysSinceFirst} de ${nextFollowUpDay})`,
+      `todavía no toca el follow-up ${recipient.followUpCount + 1} (día ${diaCampana} de ${nextFollowUpDay})`,
       retryAfter,
     );
   }

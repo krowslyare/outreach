@@ -25,7 +25,7 @@ export interface SendDependencies {
     | "markError"
     | "tripKillSwitch"
   >;
-  client: Pick<WaClient, "sendText">;
+  client: Pick<WaClient, "sendText" | "sendImage">;
   config: SafetyConfig;
   now: () => Date;
 }
@@ -50,11 +50,26 @@ export function attemptSend(
   step: SendStep,
 ): Promise<SendResult> {
   const turno = cola.then(
-    () => intentar(deps, e164, body, step),
-    () => intentar(deps, e164, body, step),
+    () => intentar(deps, e164, body, step, null),
+    () => intentar(deps, e164, body, step, null),
   );
   // La cola avanza aunque este intento falle; si no, un rechazo la dejaría
   // envenenada y bloquearía todos los envíos siguientes.
+  cola = turno.catch(() => undefined);
+  return turno;
+}
+
+export function attemptSendImage(
+  deps: SendDependencies,
+  e164: string,
+  image: Uint8Array,
+  caption: string,
+  step: SendStep,
+): Promise<SendResult> {
+  const turno = cola.then(
+    () => intentar(deps, e164, caption, step, image),
+    () => intentar(deps, e164, caption, step, image),
+  );
   cola = turno.catch(() => undefined);
   return turno;
 }
@@ -64,6 +79,7 @@ async function intentar(
   e164: string,
   body: string,
   step: SendStep,
+  image: Uint8Array | null,
 ): Promise<SendResult> {
   const now = deps.now();
   let health = deps.store.loadAccountHealth(now);
@@ -102,7 +118,10 @@ async function intentar(
 
   let waMessageId: string;
   try {
-    waMessageId = await deps.client.sendText(e164, body);
+    waMessageId =
+      image === null
+        ? await deps.client.sendText(e164, body)
+        : await deps.client.sendImage(e164, image, body);
   } catch (error) {
     const reason = error instanceof Error ? error.message : String(error);
     deps.store.markError(messageId, reason);

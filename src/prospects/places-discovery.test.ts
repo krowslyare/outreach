@@ -30,7 +30,7 @@ describe("descubrimiento modular con Places", () => {
       "https://places.googleapis.com/v1/places:searchText",
     );
     expect(JSON.parse(request[1]!.body as string)).toEqual({
-      textQuery: "clínica veterinaria en Surco, Lima, Perú",
+      textQuery: "clínica veterinaria en Surco, Perú",
       languageCode: "es",
       regionCode: "PE",
       pageSize: 10,

@@ -1,8 +1,12 @@
 import { describe, expect, it, vi } from "vitest";
 
-import { crearAgrupador } from "./rafaga.js";
+import { crearAgrupador, ESPERA_RAFAGA_MS } from "./rafaga.js";
 
 describe("crearAgrupador", () => {
+  it("espera lo suficiente para que la respuesta no parezca instantánea", () => {
+    expect(ESPERA_RAFAGA_MS).toBe(45_000);
+  });
+
   // Tres mensajes seguidos son una ráfaga: se contesta una vez, no tres.
   it("colapsa varios avisos del mismo chat en una sola ejecución", async () => {
     vi.useFakeTimers();

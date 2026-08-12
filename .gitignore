@@ -12,3 +12,10 @@ node_modules/
 .wwebjs_auth/
 outreach.sqlite
 .baileys_auth/
+
+# Estado y artefactos locales de campaña; no subir PII, sesiones ni medios.
+*.sqlite
+*.sqlite-*
+.baileys_auth.*
+prospectos/
+visuales/

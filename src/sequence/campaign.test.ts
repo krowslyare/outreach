@@ -10,6 +10,7 @@ import {
   ejecutarTanda,
   type DependenciasCampana,
 } from "./campaign.js";
+import type { VisualAprobado } from "./visual.js";
 
 const NOW = new Date("2026-07-27T15:00:00.000Z");
 
@@ -63,6 +64,11 @@ function fakeDeps(options: FakeOptions = {}): {
   events: string[];
   generar: ReturnType<typeof vi.fn<ProveedorLLM["generar"]>>;
   sendText: ReturnType<typeof vi.fn<(e164: string, body: string) => Promise<string>>>;
+  sendImage: ReturnType<
+    typeof vi.fn<
+      (e164: string, image: Uint8Array, caption: string) => Promise<string>
+    >
+  >;
   sleeps: number[];
 } {
   const events: string[] = [];
@@ -81,6 +87,12 @@ function fakeDeps(options: FakeOptions = {}): {
     async (e164: string, _body: string): Promise<string> => {
       events.push(`sendText:${e164}`);
       return `wa-${e164}`;
+    },
+  );
+  const sendImage = vi.fn(
+    async (e164: string, _image: Uint8Array, _caption: string): Promise<string> => {
+      events.push(`sendImage:${e164}`);
+      return `wa-image-${e164}`;
     },
   );
 
@@ -111,6 +123,7 @@ function fakeDeps(options: FakeOptions = {}): {
           nombre: `Clínica ${e164}`,
           distrito: "MIRAFLORES",
           clasificacion: "CENTRO ODONTOLOGICO",
+          vertical: "dental",
           tieneWeb: false,
           resenas: 20,
         };
@@ -138,7 +151,7 @@ function fakeDeps(options: FakeOptions = {}): {
       },
     },
     proveedor: { nombre: "fake", generar },
-    client: { sendText },
+    client: { sendText, sendImage },
     config: {
       ...DEFAULT_SAFETY_CONFIG,
       minGapSeconds: 0,
@@ -153,7 +166,7 @@ function fakeDeps(options: FakeOptions = {}): {
     random: () => 0,
   };
 
-  return { deps, events, generar, sendText, sleeps };
+  return { deps, events, generar, sendText, sendImage, sleeps };
 }
 
 describe("ejecutarTanda", () => {
@@ -194,6 +207,9 @@ describe("ejecutarTanda", () => {
     expect(resumen.saltadosPorDestinatario).toBe(1);
     expect(resumen.enviados).toBe(1);
     expect(generar).toHaveBeenCalledTimes(1);
+    expect(generar.mock.calls[0]?.[0].mensajes[0]?.texto).toContain(
+      "Apertura asignada para este prospecto: derivacion",
+    );
     expect(sendText).toHaveBeenCalledOnce();
     expect(sendText).toHaveBeenCalledWith(second, "Mensaje compuesto?");
   });
@@ -237,6 +253,37 @@ describe("ejecutarTanda", () => {
     expect(pasos).toEqual(["first", "fu1", "fu2"]);
   });
 
+  it("filtra por paso sin rellenar el cupo con prospectos de otros pasos", async () => {
+    const e164s = ["+51900000001", "+51900000002", "+51900000003"];
+    const antiguo = new Date(NOW.getTime() - 10 * 86_400_000);
+    const { deps, generar, sendText, events } = fakeDeps({
+      e164s,
+      recipients: {
+        [e164s[0]!]: recipient(e164s[0]!),
+        [e164s[1]!]: recipient(e164s[1]!, {
+          firstOutboundAt: antiguo,
+          lastOutboundAt: antiguo,
+          followUpCount: 0,
+        }),
+        [e164s[2]!]: recipient(e164s[2]!, {
+          firstOutboundAt: antiguo,
+          lastOutboundAt: antiguo,
+          followUpCount: 1,
+        }),
+      },
+    });
+
+    const resumen = await ejecutarTanda(deps, { paso: "fu1", max: 3 });
+
+    expect(resumen.enviados).toBe(1);
+    expect(resumen.saltadosPorDestinatario).toBe(2);
+    expect(generar).toHaveBeenCalledOnce();
+    expect(sendText).toHaveBeenCalledWith(e164s[1], "Mensaje compuesto?");
+    expect(events.filter((evento) => evento.startsWith("claim:"))).toEqual([
+      `claim:${e164s[1]}:fu1`,
+    ]);
+  });
+
   it("una composición fallida se registra y no tumba la tanda", async () => {
     const { deps, sendText } = fakeDeps({
       e164s: ["+51900000001", "+51900000002"],
@@ -273,9 +320,90 @@ describe("ejecutarTanda", () => {
         e164: "+51900000001",
         nombre: "Clínica +51900000001",
         paso: "first",
+        intencionApertura: "derivacion",
         texto: "Mensaje compuesto?",
+        tipo: "text",
       },
     ]);
+  });
+
+  it("dry-run visual no llama al LLM y expone imagen y caption para revisión", async () => {
+    const e164 = "+51900000001";
+    const antiguo = new Date(NOW.getTime() - 10 * 86_400_000);
+    const { deps, generar, sendImage } = fakeDeps({
+      e164s: [e164],
+      recipients: {
+        [e164]: recipient(e164, {
+          firstOutboundAt: antiguo,
+          lastOutboundAt: antiguo,
+        }),
+      },
+    });
+    const visual: VisualAprobado = {
+      e164,
+      paso: "fu1",
+      nombre: "Clínica Curada",
+      ruta: "/aprobados/hero.png",
+      imagen: new Uint8Array([1, 2, 3]),
+      ancho: 1664,
+      alto: 936,
+    };
+
+    const resumen = await ejecutarTanda(deps, {
+      dryRun: true,
+      visuales: new Map([[e164, visual]]),
+    });
+
+    expect(generar).not.toHaveBeenCalled();
+    expect(sendImage).not.toHaveBeenCalled();
+    expect(resumen.mensajesCompuestos).toEqual([
+      expect.objectContaining({
+        e164,
+        paso: "fu1",
+        intencionApertura: "visual",
+        tipo: "image",
+        imagen: "/aprobados/hero.png",
+        texto: expect.stringMatching(/propuesta visual inicial[\s\S]*Clínica Curada/u),
+      }),
+    ]);
+  });
+
+  it("envía solo el visual aprobado y conserva la idempotencia del paso", async () => {
+    const elegido = "+51900000001";
+    const excluido = "+51900000002";
+    const antiguo = new Date(NOW.getTime() - 10 * 86_400_000);
+    const { deps, generar, sendText, sendImage, events } = fakeDeps({
+      e164s: [excluido, elegido],
+      recipients: {
+        [elegido]: recipient(elegido, {
+          firstOutboundAt: antiguo,
+          lastOutboundAt: antiguo,
+        }),
+      },
+    });
+    const visual: VisualAprobado = {
+      e164: elegido,
+      paso: "fu1",
+      ruta: "/aprobados/hero.png",
+      imagen: new Uint8Array([1, 2, 3]),
+      ancho: 1664,
+      alto: 936,
+    };
+
+    const resumen = await ejecutarTanda(deps, {
+      visuales: new Map([[elegido, visual]]),
+    });
+
+    expect(resumen.enviados).toBe(1);
+    expect(generar).not.toHaveBeenCalled();
+    expect(sendText).not.toHaveBeenCalled();
+    expect(sendImage).toHaveBeenCalledWith(
+      elegido,
+      visual.imagen,
+      expect.stringContaining("hace unos días"),
+    );
+    expect(events).toContain(`claim:${elegido}:fu1`);
+    expect(events).not.toContain(`recipient:${excluido}`);
   });
 
   it("recompone con otra apertura cuando la auditoría detecta repetición", async () => {
@@ -297,6 +425,12 @@ describe("ejecutarTanda", () => {
     expect(resumen.mensajesCompuestos[1]?.texto).toBe(
       "Buscando la clínica, pensé en una web propia para sus pacientes?",
     );
+    expect(
+      generar.mock.calls.slice(1).map(([solicitud]) => solicitud.mensajes[0]?.texto),
+    ).toEqual([
+      expect.stringContaining("Apertura asignada para este prospecto: busqueda"),
+      expect.stringContaining("Apertura asignada para este prospecto: busqueda"),
+    ]);
   });
 
   it("no compone antes de verificar ambas puertas", async () => {
@@ -344,6 +478,37 @@ describe("ejecutarTanda", () => {
     await ejecutarTanda(deps, { max: 1, dryRun: true, vertical: "dental" });
 
     expect(candidatos).toHaveBeenCalledWith(100, 0, "dental");
+  });
+
+  it("soloFollowUps nunca abre un chat nuevo y conserva los follow-ups elegibles", async () => {
+    const nuevo = "+51900000001";
+    const seguimiento = "+51900000002";
+    const antiguo = new Date(NOW.getTime() - 10 * 86_400_000);
+    const { deps } = fakeDeps({
+      e164s: [nuevo, seguimiento],
+      recipients: {
+        [nuevo]: recipient(nuevo),
+        [seguimiento]: recipient(seguimiento, {
+          firstOutboundAt: antiguo,
+          lastOutboundAt: antiguo,
+          followUpCount: 0,
+        }),
+      },
+      respuestas: [texto("Seguimiento")],
+    });
+
+    const resumen = await ejecutarTanda(deps, {
+      max: 10,
+      dryRun: true,
+      soloFollowUps: true,
+    });
+
+    expect(resumen.mensajesCompuestos).toHaveLength(1);
+    expect(resumen.mensajesCompuestos[0]).toMatchObject({
+      e164: seguimiento,
+      paso: "fu1",
+    });
+    expect(resumen.saltadosPorDestinatario).toBe(1);
   });
 });
 
@@ -398,6 +563,26 @@ describe("paginación de candidatos", () => {
 
     expect(resumen.mensajesCompuestos).toHaveLength(1);
     expect(resumen.mensajesCompuestos[0]?.e164).toBe("+51931845435");
+  });
+
+  it("--solo repetido restringe la tanda a la lista explícita", async () => {
+    const objetivoA = "+51931845435";
+    const objetivoB = "+51931845436";
+    const { deps } = fakeDeps({
+      e164s: ["+51900000001", objetivoA, "+51900000003", objetivoB],
+      respuestas: [texto("A"), texto("B")],
+    });
+
+    const resumen = await ejecutarTanda(deps, {
+      max: 10,
+      dryRun: true,
+      solos: [objetivoA, objetivoB],
+    });
+
+    expect(resumen.mensajesCompuestos.map((mensaje) => mensaje.e164)).toEqual([
+      objetivoA,
+      objetivoB,
+    ]);
   });
 
   // El filtro se aplica a la página ya leída y el desplazamiento avanza por el

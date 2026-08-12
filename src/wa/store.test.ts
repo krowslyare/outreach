@@ -596,6 +596,22 @@ describe("revisión manual del tramo sin verificar", () => {
     expect(store.candidatosParaContactar(10)).toEqual([]);
   });
 
+  it("permite corregir a 'tiene web' después de aprobar sin web", () => {
+    const store = conPendiente();
+
+    expect(store.resolverWeb("+51999111222", false, 18)).toBe(true);
+    store.guardarPerfilWhatsApp("+51999111222", {
+      description: "Clínica A",
+      category: "Dentista",
+      address: "Miraflores",
+      websites: [],
+    });
+    expect(store.aprobarProspecto("+51999111222").ok).toBe(true);
+    expect(store.resolverWeb("+51999111222", true, 18)).toBe(true);
+    expect(store.loadFichaProspecto("+51999111222")!.tieneWeb).toBe(true);
+    expect(store.loadRecipientState("+51999111222").suppressed).toBe(true);
+  });
+
   // Sin esto, un tipeo en el número se leería como revisión hecha.
   it("no finge haber resuelto algo que no estaba pendiente", () => {
     const store = conPendiente();
@@ -825,6 +841,9 @@ describe("gate de aprobación de prospectos", () => {
       origin: "meta",
       sourceUrl: "https://www.facebook.com/ads/library/",
     });
+    expect(store.loadFichaProspecto("+51999111222")?.vertical).toBe(
+      "veterinary",
+    );
   });
 
   it("un sitio propio encontrado en WhatsApp bloquea la aprobación", () => {
@@ -943,6 +962,8 @@ describe("gate de aprobación de prospectos", () => {
   it("distingue una red social de un sitio propio", () => {
     expect(esSitioPropio("https://instagram.com/clinica")).toBe(false);
     expect(esSitioPropio("https://wa.me/51999111222")).toBe(false);
+    expect(esSitioPropio("https://bit.ly/sacarCita")).toBe(false);
+    expect(esSitioPropio("https://beacons.ai/clinica")).toBe(false);
     expect(esSitioPropio("clinica.pe")).toBe(true);
     expect(esSitioPropio("texto que no es url")).toBe(false);
   });

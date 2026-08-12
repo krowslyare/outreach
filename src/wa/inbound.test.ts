@@ -62,6 +62,26 @@ describe("handleInbound", () => {
     expect(events).toEqual(["recordInbound:humano"]);
   });
 
+  it("registra un chat vacío como humano pero no lo manda al agente", () => {
+    const events: string[] = [];
+    expect(handleInbound(deps(events), evento({ body: "   " }))).toEqual({
+      action: "empty",
+    });
+    // Sigue cortando la cadencia: no se disfraza como autorespondedor.
+    expect(events).toEqual(["recordInbound:humano"]);
+  });
+
+  it("registra una reacción pero no la manda al agente", () => {
+    const events: string[] = [];
+    expect(
+      handleInbound(
+        deps(events),
+        evento({ body: "[reaction]", tipo: "reaction", tieneMedia: true }),
+      ),
+    ).toEqual({ action: "empty" });
+    expect(events).toEqual(["recordInbound:humano"]);
+  });
+
   it("registra el autorespondedor y no lo manda al agente", () => {
     const events: string[] = [];
     const resultado = handleInbound(

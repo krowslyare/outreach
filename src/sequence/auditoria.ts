@@ -2,6 +2,13 @@ export interface ContextoAuditoria {
   clasificacion: string;
   aperturasRecientes: string[];
   paso?: "first" | "fu1" | "fu2";
+  intencionApertura?:
+    | "derivacion"
+    | "busqueda"
+    | "operativa"
+    | "permiso"
+    | "directa"
+    | "modelo";
 }
 
 export type ResultadoAuditoria =
@@ -55,6 +62,17 @@ export function auditarMensaje(
     motivos.push("contiene taxonomía cruda del padrón");
   }
 
+  const insinuaEspecializacionSectorial =
+    /(?:somos|kurogrid es)\s+(?:un\s+equipo\s+de\s+)?especialistas?\s+en[\s\S]{0,100}(?:cl[ií]nicas?|consultorios?|veterinarias?|odontolog[ií]a)/iu.test(
+      texto,
+    ) ||
+    /(?:diseñamos|desarrollamos|hacemos|creamos|publicamos|mantenemos|trabajamos|ayudamos)[\s\S]{0,120}\b(?:para|con|a)\s+(?:cl[ií]nicas?|consultorios?|veterinarias?|centros\s+(?:dentales|m[eé]dicos|veterinarios))/iu.test(
+      texto,
+    );
+  if (insinuaEspecializacionSectorial) {
+    motivos.push("insinúa especialización o experiencia previa en el rubro");
+  }
+
   const palabras = texto.match(/\p{L}+/gu) ?? [];
   const noPermitidas = palabras.filter((palabra) => {
     const esSostenida =
@@ -87,6 +105,22 @@ export function auditarMensaje(
   }
 
   if (contexto.paso === "first") {
+    if (texto.length > 320) {
+      motivos.push(`el primer contacto supera 320 caracteres (${texto.length})`);
+    }
+
+    if (
+      contexto.intencionApertura !== undefined &&
+      contexto.intencionApertura !== "modelo" &&
+      /(mensualidad|pago inicial|costo (?:inicial )?de desarrollo|desarrollo inicial)/iu.test(
+        texto,
+      )
+    ) {
+      motivos.push(
+        `la apertura ${contexto.intencionApertura} repite el ángulo comercial reservado para modelo`,
+      );
+    }
+
     const preguntas = texto.match(/\?/gu)?.length ?? 0;
     if (preguntas !== 1) {
       motivos.push(`el primer contacto debe tener una sola pregunta (${preguntas})`);

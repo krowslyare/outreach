@@ -11,6 +11,7 @@ const PROSPECTO = {
   nombre: "Clínica Ejemplo",
   distrito: "Miraflores",
   clasificacion: "Clínica",
+  vertical: "dental",
   tieneWeb: false,
   resenas: 42,
 };
@@ -39,6 +40,25 @@ function proveedorCapturador(respuesta: RespuestaLLM): {
 }
 
 describe("componerMensaje", () => {
+  it("prohíbe convertir el primer follow-up en una encuesta", async () => {
+    const captura = proveedorCapturador({
+      corte: "fin",
+      texto: "Mensaje listo",
+      herramienta: null,
+    });
+    await componerMensaje(captura.proveedor, PROSPECTO, "fu1", [], "directa", []);
+    const sistema = captura.solicitud().sistema;
+
+    expect(sistema).toContain(
+      "El follow-up NO es una encuesta ni una sesión de discovery",
+    );
+    expect(sistema).toContain(
+      "qué tratamientos quieren destacar",
+    );
+    expect(sistema).toContain(
+      "Aporta UN dato comercial nuevo",
+    );
+  });
   it("solicita solo texto mediante el puerto neutral", async () => {
     const captura = proveedorCapturador({
       corte: "fin",
@@ -57,6 +77,64 @@ describe("componerMensaje", () => {
       esfuerzo: "high",
     });
     expect(captura.solicitud().herramientas).toBeUndefined();
+    expect(captura.solicitud().sistema).toContain(
+      "El rubro personaliza; no demuestra experiencia previa",
+    );
+    expect(captura.solicitud().sistema).toContain(
+      'NO afirmes que Kurogrid se especializa en esa industria',
+    );
+    expect(captura.solicitud().sistema).toContain(
+      "La propuesta es para ESE negocio",
+    );
+    expect(captura.solicitud().sistema).toContain("Saludo humano");
+    expect(captura.solicitud().sistema).toContain(
+      "No necesitas saber ni mencionar el nombre de la persona",
+    );
+    expect(captura.solicitud().sistema).toContain("nombre del negocio");
+    expect(captura.solicitud().mensajes[0]?.texto).toMatch(
+      /Saludo recomendado para este momento en Lima: (Buenos días|Buenas tardes)/,
+    );
+  });
+
+  it("no añade saludo recomendado a los follow-ups", async () => {
+    const captura = proveedorCapturador({
+      corte: "fin",
+      texto: "Mensaje listo",
+      herramienta: null,
+    });
+
+    await componerMensaje(captura.proveedor, PROSPECTO, "fu1", [], "directa", []);
+
+    expect(captura.solicitud().mensajes[0]?.texto).not.toContain(
+      "Saludo recomendado para este momento",
+    );
+  });
+
+  it("usa el perfil vertical compartido para orientar el mensaje", async () => {
+    const captura = proveedorCapturador({
+      corte: "fin",
+      texto: "Mensaje listo",
+      herramienta: null,
+    });
+
+    await componerMensaje(
+      captura.proveedor,
+      {
+        ...PROSPECTO,
+        nombre: "Estudio Horizonte",
+        clasificacion: "Estudio de arquitectura e interiorismo",
+        vertical: "interiors",
+      },
+      "first",
+      [],
+      "directa",
+      [],
+    );
+
+    const contexto = captura.solicitud().mensajes[0]?.texto ?? "";
+    expect(contexto).toContain("Estudios de arquitectura e interiorismo");
+    expect(contexto).toContain("experiencia digital premium");
+    expect(contexto).toContain("el gancho principal sigue siendo imagen");
   });
 
   it.each([

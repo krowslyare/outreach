@@ -93,8 +93,8 @@ describe("canSendNow", () => {
   });
 
   it.each([
-    [1, 30],
-    [2, 30],
+    [1, 42],
+    [2, 42],
     [3, 40],
     [4, 40],
     [5, 50],
@@ -225,8 +225,11 @@ describe("canContact", () => {
   });
 
   it("abre el primer follow-up en el día 3 y no antes", () => {
-    const firstSentAt = new Date("2026-07-24T15:00:00.000Z");
-    const before = new Date("2026-07-27T14:59:59.000Z");
+    // Jueves 14:30 Lima = día 1. El sábado desde medianoche local es día 3;
+    // no se esperan 72 horas completas.
+    const firstSentAt = new Date("2026-07-30T19:30:00.000Z");
+    const before = new Date("2026-07-31T23:59:59.000Z");
+    const saturdayMorning = new Date("2026-08-01T15:30:00.000Z");
 
     expect(
       canContact(
@@ -237,13 +240,13 @@ describe("canContact", () => {
     ).toEqual({
       allow: false,
       reason: expect.stringContaining("día 2 de 3"),
-      retryAfter: new Date("2026-07-27T15:00:00.000Z"),
+      retryAfter: new Date("2026-08-01T05:00:00.000Z"),
     });
     expect(
       canContact(
         recipient({ lastOutboundAt: firstSentAt }),
         config(),
-        MONDAY_AT_10_LIMA,
+        saturdayMorning,
       ),
     ).toEqual({ allow: true });
   });
@@ -251,9 +254,9 @@ describe("canContact", () => {
   it("abre el segundo follow-up en el día 7 desde el primer contacto", () => {
     // REGRESIÓN: medir desde lastOutboundAt corría la fecha con cada envío, así
     // que tras el FU1 (día 3) el FU2 caía el día 10 en vez del 7.
-    const firstSentAt = new Date("2026-07-24T15:00:00.000Z");
-    const followUpOneSentAt = new Date("2026-07-27T15:00:00.000Z");
-    const daySevenFromFirst = new Date("2026-07-31T15:00:00.000Z");
+    const firstSentAt = new Date("2026-07-24T19:30:00.000Z");
+    const followUpOneSentAt = new Date("2026-07-26T15:00:00.000Z");
+    const daySevenFromFirst = new Date("2026-07-30T15:00:00.000Z");
     const state = recipient({
       firstOutboundAt: firstSentAt,
       lastOutboundAt: followUpOneSentAt,
@@ -265,7 +268,7 @@ describe("canContact", () => {
     });
     // Y el día 6 desde el primero todavía no.
     expect(
-      canContact(state, config(), new Date("2026-07-30T15:00:00.000Z")),
+      canContact(state, config(), new Date("2026-07-29T15:00:00.000Z")),
     ).toMatchObject({ allow: false, reason: expect.stringContaining("día 6 de 7") });
   });
 
