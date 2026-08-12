@@ -119,6 +119,30 @@ describe("interpretar", () => {
     });
   });
 
+  it("conserva una respuesta concreta opcional para el acuse del handoff", () => {
+    expect(
+      interpretar({
+        corte: "fin",
+        texto: "",
+        herramienta: {
+          nombre: "escalar_a_humano",
+          input: {
+            motivo: "quiere_contratar",
+            resumen: "Quiere todo y preguntó el precio.",
+            respuesta_concreta:
+              "La opción que reúne todo eso es Empresa + — S/ 649 mensual.",
+          },
+        },
+      }),
+    ).toEqual({
+      kind: "escalar",
+      motivo: "quiere_contratar",
+      resumen: "Quiere todo y preguntó el precio.",
+      respuestaConcreta:
+        "La opción que reúne todo eso es Empresa + — S/ 649 mensual.",
+    });
+  });
+
   it("traduce marcar_perdido conservando el motivo", () => {
     expect(
       interpretar({

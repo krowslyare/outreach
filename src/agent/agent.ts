@@ -24,7 +24,17 @@ export interface Turno {
 
 export type AgentDecision =
   | { kind: "responder"; texto: string }
-  | { kind: "escalar"; motivo: string; resumen: string }
+  | {
+      kind: "escalar";
+      motivo: string;
+      resumen: string;
+      /**
+       * Respuesta breve a una duda concreta que sí cubre el catálogo.
+       * El handoff la antepone a su acuse fijo para responder y derivar en un
+       * solo mensaje, sin obligar al modelo a redactar el cierre operativo.
+       */
+      respuestaConcreta?: string;
+    }
   | { kind: "perdido"; motivo: string };
 
 const HERRAMIENTAS: readonly HerramientaLLM[] = [
@@ -56,6 +66,13 @@ const HERRAMIENTAS: readonly HerramientaLLM[] = [
           description:
             "Dos o tres líneas para que el dueño entre en contexto sin leer todo el hilo: " +
             "qué necesita, qué plan le calza y en qué quedó la conversación.",
+        },
+        respuesta_concreta: {
+          type: "string",
+          description:
+            "Opcional. Una sola frase para contestar antes del handoff una duda concreta " +
+            "que sí resuelve el catálogo, por ejemplo el plan y su precio exacto. No " +
+            "incluyas aquí el aviso de derivación ni una pregunta; el sistema los agrega.",
         },
       },
       required: ["motivo", "resumen"],
@@ -181,10 +198,14 @@ export function interpretar(respuesta: RespuestaLLM): AgentDecision {
   if (herramienta?.nombre === "escalar_a_humano") {
     // El escalamiento se evalúa primero para conservar su prioridad si el
     // puerto llegara a admitir más de una herramienta en el futuro.
+    const respuestaConcreta = String(
+      herramienta.input.respuesta_concreta ?? "",
+    ).trim();
     return {
       kind: "escalar",
       motivo: String(herramienta.input.motivo ?? "fuera_de_mi_alcance"),
       resumen: String(herramienta.input.resumen ?? ""),
+      ...(respuestaConcreta.length > 0 ? { respuestaConcreta } : {}),
     };
   }
   if (herramienta?.nombre === "marcar_perdido") {
