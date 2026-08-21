@@ -1,5 +1,11 @@
 import { createRequire } from "node:module";
 
+import type {
+  EstadoCliente,
+  PlanCliente,
+  RequisitoCliente,
+} from "../onboarding/requisitos.js";
+import { plantillaRequisitos } from "../onboarding/requisitos.js";
 import type { ScoredProspect } from "../types.js";
 import type { ClaseInbound } from "./clasificar.js";
 import type {
@@ -96,6 +102,20 @@ export interface FilaColaAtencion {
   sinResolver: number;
 }
 
+/** La ficha de un cliente cerrado, con su checklist completo. */
+export interface ClienteCompleto {
+  e164: string;
+  nombreComercial: string;
+  plan: PlanCliente;
+  estado: EstadoCliente;
+  /** Notas fechadas, append-only. Ver agregarNotaCliente. */
+  notas: string | null;
+  creadoEn: Date;
+  /** Primera publicación; queda aunque el estado cambie después. */
+  publicadoEn: Date | null;
+  requisitos: RequisitoCliente[];
+}
+
 /**
  * Qué corresponde hacer con un entrante recién llegado.
  *
@@ -173,11 +193,39 @@ create table if not exists prospect_metadata (
     check (approval_status in ('pending', 'approved', 'rejected')),
   review_reason text,
   reviewed_at text,
-  wa_description text,
-  wa_category text,
-  wa_address text,
-  wa_websites text,
-  wa_checked_at text);
+   wa_description text,
+   wa_category text,
+   wa_address text,
+   wa_websites text,
+   wa_checked_at text);
+
+-- El circuito no termina en el handoff: cuando el prospecto dice sí, se abre
+-- una ficha de cliente con los requisitos de su web. Vive en la misma base a
+-- propósito: la bandeja, las conversaciones y el onboarding leen un solo lugar,
+-- sin un segundo sistema que sincronizar.
+--
+-- Sin llave foránea a recipients a propósito: un cliente puede llegar por
+-- referencia directa sin haber sido nunca prospecto de campaña.
+create table if not exists clientes (
+  e164 text primary key,
+  nombre_comercial text not null,
+  plan text not null check (plan in ('presencia','empresa','empresa_plus','sistemas')),
+  estado text not null default 'kickoff'
+    check (estado in ('kickoff','recoleccion','construccion','publicado','baja')),
+  notas text,
+  creado_en text not null,
+  publicado_en text);
+
+-- Checklist por cliente, sembrado desde la plantilla del plan al crear la
+-- ficha. No registra quién marcó cada ítem porque esto lo opera una sola
+-- persona; si eso cambia, la tabla crece, no se migra.
+create table if not exists cliente_requisitos (
+  cliente_e164 text not null references clientes(e164) on delete cascade,
+  clave text not null,
+  etiqueta text not null,
+  resuelto integer not null default 0,
+  resuelto_en text,
+  primary key (cliente_e164, clave));
 `;
 
 function asDate(value: string | null): Date | null {
@@ -1714,6 +1762,199 @@ export class Store {
         "update account_state set device_rate_baseline = ? where id = 1",
       )
       .run(rate);
+  }
+
+  /**
+   * Abre la ficha de un cliente cerrado y siembra su checklist según el plan.
+   *
+   * El e164 NO exige existir en recipients: un cliente puede llegar por
+   * referencia sin haber pasado por la campaña. Y falla si ya es cliente en vez
+   * de hacer upsert: re-crear una ficha reiniciaría el checklist, que es justo
+   * el tipo de daño silencioso que una base operativa no debe permitir.
+   */
+  crearCliente(input: {
+    e164: string;
+    nombreComercial: string;
+    plan: PlanCliente;
+    notas?: string;
+  }): void {
+    const ahora = this.clock().toISOString();
+    this.db.exec("begin immediate");
+    try {
+      const existente = this.db
+        .prepare("select e164 from clientes where e164 = ?")
+        .get(input.e164);
+      if (existente !== undefined) {
+        throw new Error(`${input.e164} ya es cliente`);
+      }
+      this.db
+        .prepare(
+          `insert into clientes (e164, nombre_comercial, plan, notas, creado_en)
+           values (?, ?, ?, ?, ?)`,
+        )
+        .run(
+          input.e164,
+          input.nombreComercial,
+          input.plan,
+          input.notas ?? null,
+          ahora,
+        );
+      const sembrar = this.db.prepare(
+        `insert into cliente_requisitos (cliente_e164, clave, etiqueta)
+         values (?, ?, ?)`,
+      );
+      for (const requisito of plantillaRequisitos(input.plan)) {
+        sembrar.run(input.e164, requisito.clave, requisito.etiqueta);
+      }
+      this.db.exec("commit");
+    } catch (error) {
+      this.db.exec("rollback");
+      throw error;
+    }
+  }
+
+  /** La ficha completa, con checklist. Null si el número no es cliente. */
+  cargarCliente(e164: string): ClienteCompleto | null {
+    const cliente = this.db
+      .prepare(
+        `select e164, nombre_comercial, plan, estado, notas, creado_en, publicado_en
+         from clientes where e164 = ?`,
+      )
+      .get(e164) as
+      | {
+          e164: string;
+          nombre_comercial: string;
+          plan: string;
+          estado: string;
+          notas: string | null;
+          creado_en: string;
+          publicado_en: string | null;
+        }
+      | undefined;
+    if (cliente === undefined) return null;
+
+    const requisitos = (
+      this.db
+        .prepare(
+          `select clave, etiqueta, resuelto, resuelto_en
+           from cliente_requisitos where cliente_e164 = ?
+           order by rowid asc`,
+        )
+        .all(e164) as Array<{
+        clave: string;
+        etiqueta: string;
+        resuelto: number;
+        resuelto_en: string | null;
+      }>
+    ).map((fila) => ({
+      clave: fila.clave,
+      etiqueta: fila.etiqueta,
+      resuelto: fila.resuelto !== 0,
+      resueltoEn: asDate(fila.resuelto_en),
+    }));
+
+    return {
+      e164: cliente.e164,
+      nombreComercial: cliente.nombre_comercial,
+      plan: cliente.plan as PlanCliente,
+      estado: cliente.estado as EstadoCliente,
+      notas: cliente.notas,
+      creadoEn: new Date(cliente.creado_en),
+      publicadoEn: asDate(cliente.publicado_en),
+      requisitos,
+    };
+  }
+
+  /**
+   * Todas las fichas, en orden de pipeline: lo activo primero por antigüedad,
+   * dado de baja al final. Es la consulta del tablero; el detalle va por
+   * cargarCliente.
+   */
+  listarClientes(): ClienteCompleto[] {
+    const filas = this.db
+      .prepare(
+        `select e164 from clientes
+         order by case estado
+             when 'kickoff' then 0
+             when 'recoleccion' then 1
+             when 'construccion' then 2
+             when 'publicado' then 3
+             else 4
+           end asc, creado_en asc`,
+      )
+      .all() as Array<{ e164: string }>;
+    return filas
+      .map((fila) => this.cargarCliente(fila.e164))
+      .filter((cliente): cliente is ClienteCompleto => cliente !== null);
+  }
+
+  /**
+   * Marca o desmarca un requisito. Devuelve false si el par cliente/clave no
+   * existe — tipeo en la clave, cliente equivocado— en vez de fallar en
+   * silencio: quien opera tiene que darse cuenta.
+   */
+  marcarRequisito(e164: string, clave: string, resuelto: boolean): boolean {
+    const resultado = this.db
+      .prepare(
+        `update cliente_requisitos
+         set resuelto = ?, resuelto_en = ?
+         where cliente_e164 = ? and clave = ?`,
+      )
+      .run(
+        resuelto ? 1 : 0,
+        resuelto ? this.clock().toISOString() : null,
+        e164,
+        clave,
+      );
+    return Number(resultado.changes) > 0;
+  }
+
+  /**
+   * Mueve la ficha de estado. Los estados no se validan como máquina formal:
+   * la operación es una persona que sabe dónde está su cliente, y exigir
+   * transiciones exactas solo genera fichas mentiras para poder avanzar.
+   *
+   * `publicado_en` queda como primera publicación, aunque después se mueva a
+   * otro estado: es un hecho histórico, no un puntero al presente.
+   */
+  cambiarEstadoCliente(e164: string, estado: EstadoCliente): void {
+    if (estado === "publicado") {
+      this.db
+        .prepare(
+          `update clientes
+           set estado = ?, publicado_en = coalesce(publicado_en, ?)
+           where e164 = ?`,
+        )
+        .run(estado, this.clock().toISOString(), e164);
+      return;
+    }
+    this.db
+      .prepare("update clientes set estado = ? where e164 = ?")
+      .run(estado, e164);
+  }
+
+  /**
+   * Agrega una nota fechada al historial de la ficha. Las notas son append-only
+   * a propósito: borrar contexto de un cliente cuesta más de lo que ahorra.
+   */
+  agregarNotaCliente(e164: string, nota: string): void {
+    const limpia = nota.trim();
+    if (limpia.length === 0) return;
+    const fecha = this.clock().toISOString().slice(0, 10);
+    const cliente = this.db
+      .prepare("select notas from clientes where e164 = ?")
+      .get(e164) as { notas: string | null } | undefined;
+    if (cliente === undefined) {
+      throw new Error(`${e164} no es cliente`);
+    }
+    const linea = `[${fecha}] ${limpia}`;
+    const nueva =
+      cliente.notas === null || cliente.notas === ""
+        ? linea
+        : `${cliente.notas}\n${linea}`;
+    this.db
+      .prepare("update clientes set notas = ? where e164 = ?")
+      .run(nueva, e164);
   }
 
   private ensureInboundRecipient(e164: string, at: Date): void {

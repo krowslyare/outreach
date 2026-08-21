@@ -28,6 +28,7 @@ mensajes, cadencia, recepción de respuestas y handoff a una persona.
 fuentes → shortlist → revisión web + perfil de WhatsApp
         → aprobación humana → dry-run → envío controlado
         → entrantes → agente → handoff humano
+        → cliente → requisitos → publicación
 ```
 
 La aprobación nunca se infiere desde Places o desde una importación. El perfil
@@ -73,6 +74,11 @@ npm run campana -- --dry-run --max 3
 # Ver qué conversaciones esperan una respuesta (tuya o del bot)
 npm run bandeja
 
+# Onboarding de un cliente cerrado: ficha, checklist y kickoff
+npm run cliente -- --nuevo +51987654321 --nombre "Clínica Sonrisa" --plan empresa+
+npm run cliente -- --kickoff +51987654321   # imprime el mensaje para pegar
+npm run cliente                              # tablero de clientes
+
 # Evaluar conversaciones offline
 npm run eval:conversaciones
 ```
@@ -98,6 +104,7 @@ src/
 ├── evals/          matriz reproducible de conversaciones
 ├── harvest/        RENIPRESS y enriquecimiento con Places
 ├── llm/            puerto y adaptadores de proveedores
+├── onboarding/     clientes cerrados: requisitos, progreso y kickoff
 ├── orquestador/    inbound, ráfagas y cola
 ├── prospects/      verticales, discovery y preflight
 ├── sequence/       auditoría, composición, cadencia y visuales opt-in
