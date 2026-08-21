@@ -70,6 +70,9 @@ npm run prospectos -- --aprobados
 # Simular una campaña: no abre WhatsApp y no envía nada
 npm run campana -- --dry-run --max 3
 
+# Ver qué conversaciones esperan una respuesta (tuya o del bot)
+npm run bandeja
+
 # Evaluar conversaciones offline
 npm run eval:conversaciones
 ```
@@ -91,6 +94,7 @@ usar el número comercial ni aumentar volumen antes de validar el circuito.
 ```text
 src/
 ├── agent/          conversación, catálogo y guardrails
+├── bandeja/        cola de atención humana leída de la base local
 ├── evals/          matriz reproducible de conversaciones
 ├── harvest/        RENIPRESS y enriquecimiento con Places
 ├── llm/            puerto y adaptadores de proveedores

@@ -967,4 +967,121 @@ describe("gate de aprobación de prospectos", () => {
     expect(esSitioPropio("clinica.pe")).toBe(true);
     expect(esSitioPropio("texto que no es url")).toBe(false);
   });
+
+  // La cola de atención es la vista de "¿a quién le debo una respuesta?".
+  // Estos casos cubren los tres motivos y el orden de lo más viejo a lo nuevo.
+  it("la cola junta escalados, deuda del bot y ajenos, lo más viejo primero", () => {
+    const temprano = new Date("2026-08-20T14:00:00.000Z");
+    const tarde = new Date("2026-08-21T02:30:00.000Z");
+    const store = new Store(":memory:");
+    stores.push(store);
+    store.importRecipients([
+      scored("A", "+51999111222"),
+      scored("B", "+51999222333"),
+    ]);
+
+    // Deuda del bot: entrante humano sin atender en una ficha de campaña.
+    store.recordInbound("+51999111222", "hola, ¿esto de qué va?", temprano, {
+      waMessageId: "wa-in-1",
+    });
+
+    // Escalado: takeover con el último turno del prospecto. El handoff ya
+    // marcó el entrante como atendido; la deuda ahora es del humano.
+    store.recordInbound("+51999222333", "me interesa", temprano, {
+      waMessageId: "wa-in-2",
+    });
+    store.marcarInboundAtendido("wa-in-2", temprano);
+    store.setHumanTakeover("+51999222333");
+
+    // Ajeno: un número fuera de campaña escribió y nadie ha decidido qué hacer.
+    store.recordInbound("+518005556666", "buenas tardes", tarde, {
+      waMessageId: "wa-in-3",
+    });
+
+    const cola = store.colaAtencion(50);
+    expect(cola.map((f) => f.motivo)).toEqual(["deuda", "escalado", "ajeno"]);
+    expect(cola[0]).toMatchObject({
+      e164: "+51999111222",
+      sinResolver: 1,
+      ultimoEntrante: "hola, ¿esto de qué va?",
+    });
+    expect(cola[1]).toMatchObject({
+      e164: "+51999222333",
+      sinResolver: 1,
+      ultimoEntrante: "me interesa",
+    });
+    // El stub de inbound no tiene nombre comercial: se muestra el número.
+    expect(cola[2]).toMatchObject({ e164: "+518005556666", nombre: "+518005556666" });
+  });
+
+  it("la cola deja fuera lo que ya no necesita a nadie", () => {
+    const at = new Date("2026-08-20T14:00:00.000Z");
+    const store = new Store(":memory:");
+    stores.push(store);
+    store.importRecipients([
+      scored("A", "+51999111222"),
+      scored("B", "+51999222333"),
+      scored("C", "+51999333444"),
+      scored("D", "+51999444555"),
+    ]);
+
+    // Respondiste tú después del takeover: el último turno es saliente.
+    store.recordInbound("+51999111222", "me interesa", at, {
+      waMessageId: "wa-in-1",
+    });
+    store.marcarInboundAtendido("wa-in-1", at);
+    store.setHumanTakeover("+51999111222");
+    store.recordOutboundLibre("+51999111222", "Le cuento", "wa-out-1", at);
+
+    // Y después llegó el saludo automático de su WhatsApp Business. Un robot
+    // escribiendo después de tu respuesta no la convierte en deuda.
+    const saludo = new Date(at.getTime() + 60_000);
+    store.recordInbound(
+      "+51999111222",
+      "Gracias por escribir, en breve lo atendemos",
+      saludo,
+      { waMessageId: "wa-in-1b", clase: "automatico" },
+    );
+
+    // Opt-out: cerrado es cerrado, aunque haya entrantes sin atender.
+    store.recordInbound("+51999222333", "no gracias", at, {
+      waMessageId: "wa-in-2",
+    });
+    store.suppress("+51999222333", "perdido: no_interesa");
+
+    // Tu propio teléfono de prueba nunca es deuda con un cliente.
+    store.importRecipients([scored("prueba:+51999333444", "+51999333444")]);
+    store.recordInbound("+51999333444", "prueba interna", at, {
+      waMessageId: "wa-in-3",
+    });
+
+    // El autorespondedor se registra, pero no hay nadie a quien deberle nada.
+    store.recordInbound("+51999444555", "en breve te atendemos", at, {
+      waMessageId: "wa-in-4",
+      clase: "automatico",
+    });
+
+    expect(store.colaAtencion(50)).toEqual([]);
+  });
+
+  it("agrupa los mensajes seguidos del mismo chat en una sola fila", () => {
+    const viejo = new Date("2026-08-19T12:00:00.000Z");
+    const nuevo = new Date("2026-08-19T12:05:00.000Z");
+    const store = new Store(":memory:");
+    stores.push(store);
+    store.importRecipients([scored("A", "+51999111222")]);
+
+    store.recordInbound("+51999111222", "hola", viejo, { waMessageId: "wa-in-1" });
+    store.recordInbound("+51999111222", "¿alguien?", nuevo, {
+      waMessageId: "wa-in-2",
+    });
+
+    const [fila] = store.colaAtencion(50);
+    expect(fila).toMatchObject({
+      e164: "+51999111222",
+      sinResolver: 2,
+      ultimoEntrante: "¿alguien?",
+      desde: viejo,
+    });
+  });
 });
