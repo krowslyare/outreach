@@ -75,6 +75,28 @@ export type ReviewMutationResult =
   | { ok: false; reason: string };
 
 /**
+ * Una fila de la cola de atención humana: una conversación donde alguien tiene
+ * que hacer algo. La forma la consume la bandeja (src/bandeja); el store solo
+ * la produce.
+ */
+export interface FilaColaAtencion {
+  e164: string;
+  nombre: string;
+  /** Ver colaAtencion para qué significa cada uno. */
+  motivo: "escalado" | "deuda" | "ajeno";
+  /** Cuándo llegó lo más viejo sin resolver de esta conversación. */
+  desde: Date;
+  /** Último entrante humano sin resolver, tal cual se guardó. */
+  ultimoEntrante: string;
+  /**
+   * Para `deuda` y `ajeno`: cuántos entrantes siguen sin atender. Para
+   * `escalado` es siempre 1: el takeover no guarda timestamp, y "el último
+   * turno es de la persona" ya es toda la información accionable que hay.
+   */
+  sinResolver: number;
+}
+
+/**
  * Qué corresponde hacer con un entrante recién llegado.
  *
  * `pendiente` es el caso que evita perder un prospecto: la fila ya está guardada
@@ -1212,6 +1234,103 @@ export class Store {
       e164: fila.e164,
       waMessageId: fila.wa_message_id,
       at: new Date(fila.created_at),
+    }));
+  }
+
+  /**
+   * La cola de atención humana: conversaciones donde ALGUIEN tiene que hacer
+   * algo, leído directo de la base y sin depender de que haya sesión de
+   * WhatsApp arriba.
+   *
+   * Tres motivos posibles, mutuamente excluyentes por construcción:
+   *
+   * - `escalado`: el bot hizo handoff (human_takeover = 1) y el último entrante
+   *   HUMANO es más reciente que el último saliente. O sea: la persona habló
+   *   después de lo último que dijimos, y nadie le contestó. Un saludo
+   *   automático posterior a tu respuesta no cuenta: un robot no convierte una
+   *   conversación atendida en deuda.
+   * - `deuda`: entrantes humanos sin `handled_at` en fichas de campaña. Es lo
+   *   mismo que devuelve `inboundsPendientes`, pero agrupado por chat: lo que el
+   *   barrido cobraría si hubiera proceso vivo, visible aunque no lo haya.
+   * - `ajeno`: lo mismo, sobre stubs creados por inbound de números fuera de la
+   *   campaña. El bot no los contesta por diseño; requieren decisión humana.
+   *
+   * Los números de prueba (`prueba:`) quedan fuera: son tu propio teléfono, no
+   * deuda con un cliente. Y los suprimidos también: un "no" ya está cerrado.
+   */
+  colaAtencion(limite: number): Array<FilaColaAtencion> {
+    const filas = this.db
+      .prepare(
+        `select e164, nombre, motivo, desde, ultimo_entrante, sin_resolver
+         from (
+           select r.e164 as e164,
+                  r.name as nombre,
+                  'escalado' as motivo,
+                  h.created_at as desde,
+                  h.body as ultimo_entrante,
+                  1 as sin_resolver
+           from recipients r
+           join messages h on h.id = (
+             select m.id from messages m
+             where m.e164 = r.e164 and m.direction = 'in'
+               and coalesce(m.inbound_class, 'humano') = 'humano'
+             order by m.created_at desc, m.id desc limit 1
+           )
+           where r.human_takeover = 1
+             and r.suppressed = 0
+             and r.source_id not like 'prueba:%'
+             -- La comparación es contra el último SALIENTE, no contra el último
+             -- turno cualquiera: el saludo automático de WhatsApp Business puede
+             -- llegar después de que ya respondiste, y ese robot no convierte
+             -- una conversación atendida en deuda.
+             and h.created_at > coalesce(
+               (select max(m2.sent_at) from messages m2
+                where m2.e164 = r.e164 and m2.direction = 'out'
+                  and m2.sent_at is not null),
+               '1970-01-01T00:00:00.000Z'
+             )
+
+           union all
+
+           select m.e164 as e164,
+                  r.name as nombre,
+                  case when r.source_id like 'inbound:%' then 'ajeno' else 'deuda' end as motivo,
+                  min(m.created_at) as desde,
+                  (select m2.body from messages m2
+                   where m2.e164 = m.e164 and m2.direction = 'in'
+                     and m2.handled_at is null
+                     and coalesce(m2.inbound_class, 'humano') = 'humano'
+                   order by m2.created_at desc, m2.id desc limit 1) as ultimo_entrante,
+                  count(*) as sin_resolver
+           from messages m
+           join recipients r on r.e164 = m.e164
+           where m.direction = 'in'
+             and m.handled_at is null
+             and coalesce(m.inbound_class, 'humano') = 'humano'
+             and r.suppressed = 0
+             and r.human_takeover = 0
+             and r.source_id not like 'prueba:%'
+           group by m.e164
+         )
+         order by desde asc, e164 asc
+         limit ?`,
+      )
+      .all(limite) as Array<{
+      e164: string;
+      nombre: string;
+      motivo: string;
+      desde: string;
+      ultimo_entrante: string | null;
+      sin_resolver: number;
+    }>;
+
+    return filas.map((fila) => ({
+      e164: fila.e164,
+      nombre: fila.nombre,
+      motivo: fila.motivo as FilaColaAtencion["motivo"],
+      desde: new Date(fila.desde),
+      ultimoEntrante: fila.ultimo_entrante ?? "",
+      sinResolver: Number(fila.sin_resolver),
     }));
   }
 

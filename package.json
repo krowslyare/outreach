@@ -13,6 +13,7 @@
     "sembrar": "tsx src/cli/sembrar.ts",
     "eval:conversaciones": "tsx src/evals/conversaciones.ts",
     "prospectos": "tsx src/cli/prospectos.ts",
+    "bandeja": "tsx src/cli/bandeja.ts",
     "test": "vitest run --passWithNoTests",
     "test:watch": "vitest",
     "typecheck": "tsc --noEmit",
