@@ -12,6 +12,12 @@ import {
 import type { ILogger } from "baileys/lib/Utils/logger.js";
 import qrcode from "qrcode-terminal";
 
+import {
+  ClienteCloudApi,
+  canalSeleccionado,
+  configDesdeEntorno,
+} from "./cloud-api.js";
+
 /**
  * Un entrante con lo que hace falta para clasificarlo.
  *
@@ -248,8 +254,12 @@ export function tipoDeMensaje(mensaje: WAMessage["message"]): string {
  *
  * Los tipos que no están acá caen en un genérico. La lista se amplía con lo que
  * se vea de verdad, no con lo que se imagine.
+ *
+ * Exportada porque el adaptador de la API oficial usa el MISMO vocabulario: el
+ * clasificador y el prompt del agente tienen que leer marcadores idénticos sin
+ * importar el canal por el que llegó el mensaje.
  */
-const NOMBRE_MEDIA: Record<string, string> = {
+export const NOMBRE_MEDIA: Record<string, string> = {
   audio: "nota de voz",
   image: "imagen",
   video: "video",
@@ -762,6 +772,17 @@ export class BaileysClient implements WaClient {
   }
 }
 
+/**
+ * Fábrica del canal. Default Baileys; CANAL=cloud activa el adaptador de la
+ * API oficial (ver cloud-api.ts para lo que ese canal puede y no puede hacer).
+ *
+ * El resto del sistema pide WaClient y no sabe qué implementación recibió: esa
+ * frontera ya permitió reemplazar whatsapp-web.js → Baileys tocando un archivo,
+ * y ahora permite probar la API oficial sin tocar nada más.
+ */
 export function createWaClient(): WaClient {
+  if (canalSeleccionado() === "cloud") {
+    return new ClienteCloudApi(configDesdeEntorno());
+  }
   return new BaileysClient();
 }
