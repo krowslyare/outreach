@@ -227,6 +227,35 @@ nombre) alcanza para dar `verificadoSinWeb` por bueno. Hoy no se hace: que
 Places no traiga el campo sigue sin probar que no exista un sitio. Pero el
 riesgo en ese tramo es bastante menor que en un match de 0.70.
 
+## Del sí al cliente (M7) — 2026-08-21
+
+El handoff termina en "te avisa"; el cierre sigue siendo humano. Lo que venía
+después —pedirle al cliente todo lo que la web necesita— vivía suelto en el
+chat personal, y ahí se pierden cierres: sin lista no hay forma de saber qué
+falta ni de qué lado está el cuello de botella.
+
+Decisiones:
+
+- **Ficha y checklist en la misma SQLite**, no un segundo sistema. La bandeja,
+  las conversaciones y el onboarding leen un solo lugar. Sin llave foránea a
+  recipients: un cliente puede llegar por referencia sin haber sido prospecto.
+- **Kickoff determinista, no LLM.** El primer mensaje al cliente cerrado es una
+  lista de necesidades, no un texto creativo; un modelo agregaría varianza sin
+  agregar nada. Lista solo lo que falta, numerado, con la regla "de a poco y
+  sin perfección" explícita: exigir todo junto es cómo se abandona un
+  onboarding.
+- **La CLI no envía nada.** El kickoff se imprime para pegarlo en el chat.
+  Enviar corresponde únicamente al proceso con sesión vinculada; un segundo
+  canal de envío duplicaría lo que la seguridad del canal evita.
+- **Estados libres** (kickoff → recoleccion → construcción → publicado, baja
+  aparte), sin máquina formal: la operación es una persona que sabe dónde está
+  su cliente, y exigir transiciones exactas solo produce fichas mentiras.
+  `publicado_en` queda como primera publicación aunque el estado siga moviéndose.
+- **Plantilla por plan**: base común (servicios, textos, fotos, logo, horario,
+  contacto, dominio) más el extra que cada plan realmente necesita
+  (destino de consultas en Empresa, datos del Libro de Reclamaciones en
+  Empresa +, flujos en Sistemas).
+
 ## Fuentes
 
 - **Google Places** (Text Search, field mask) — opera, teléfono, sin web, reseñas.

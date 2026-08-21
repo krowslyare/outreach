@@ -1084,4 +1084,147 @@ describe("gate de aprobación de prospectos", () => {
       desde: viejo,
     });
   });
+
+  // El onboarding vive en la misma base que la campaña: una ficha por cliente
+  // cerrado, con el checklist sembrado según su plan.
+  it("crea la ficha de cliente con el checklist de su plan y rechaza duplicados", () => {
+    const hoy = new Date("2026-08-21T15:00:00.000Z");
+    const store = new Store(":memory:", () => hoy);
+    stores.push(store);
+
+    store.crearCliente({
+      e164: "+51999111222",
+      nombreComercial: "Clínica Sonrisa",
+      plan: "empresa_plus",
+    });
+
+    const ficha = store.cargarCliente("+51999111222");
+    expect(ficha).toMatchObject({
+      e164: "+51999111222",
+      nombreComercial: "Clínica Sonrisa",
+      plan: "empresa_plus",
+      estado: "kickoff",
+      notas: null,
+    });
+    expect(ficha?.creadoEn).toEqual(hoy);
+    const claves = ficha?.requisitos.map((r) => r.clave);
+    expect(claves).toContain("libro_reclamos");
+    expect(claves).not.toContain("destino_consultas");
+    expect(ficha?.requisitos.every((r) => !r.resuelto)).toBe(true);
+
+    expect(() =>
+      store.crearCliente({
+        e164: "+51999111222",
+        nombreComercial: "Otra vez",
+        plan: "presencia",
+      }),
+    ).toThrow("ya es cliente");
+  });
+
+  it("un cliente puede existir sin haber sido prospecto de campaña", () => {
+    const store = new Store(":memory:");
+    stores.push(store);
+
+    store.crearCliente({
+      e164: "+51999888777",
+      nombreComercial: "Referido directo",
+      plan: "presencia",
+    });
+
+    expect(store.cargarCliente("+51999888777")?.plan).toBe("presencia");
+  });
+
+  it("marca y desmarca requisitos, y avisa cuando la clave no existe", () => {
+    const store = new Store(":memory:", () => new Date("2026-08-21T15:00:00.000Z"));
+    stores.push(store);
+    store.crearCliente({
+      e164: "+51999111222",
+      nombreComercial: "Clínica Sonrisa",
+      plan: "presencia",
+    });
+
+    expect(store.marcarRequisito("+51999111222", "fotos", true)).toBe(true);
+    let ficha = store.cargarCliente("+51999111222");
+    expect(
+      ficha?.requisitos.find((r) => r.clave === "fotos"),
+    ).toMatchObject({ resuelto: true, resueltoEn: new Date("2026-08-21T15:00:00.000Z") });
+
+    // Desmarcar limpia la fecha: no queda un "resuelto" sin cuándo.
+    expect(store.marcarRequisito("+51999111222", "fotos", false)).toBe(true);
+    ficha = store.cargarCliente("+51999111222");
+    expect(ficha?.requisitos.find((r) => r.clave === "fotos")).toMatchObject({
+      resuelto: false,
+      resueltoEn: null,
+    });
+
+    // Un tipeo en la clave devuelve false en vez de fingir que funcionó.
+    expect(store.marcarRequisito("+51999111222", "foto", true)).toBe(false);
+    expect(store.marcarRequisito("+51999999999", "fotos", true)).toBe(false);
+  });
+
+  it("publicado_en queda como primera publicación aunque el estado siga moviéndose", () => {
+    let ahora = new Date("2026-08-21T15:00:00.000Z");
+    const store = new Store(":memory:", () => ahora);
+    stores.push(store);
+    store.crearCliente({
+      e164: "+51999111222",
+      nombreComercial: "Clínica Sonrisa",
+      plan: "presencia",
+    });
+
+    store.cambiarEstadoCliente("+51999111222", "publicado");
+    expect(store.cargarCliente("+51999111222")).toMatchObject({
+      estado: "publicado",
+      publicadoEn: ahora,
+    });
+
+    // Volver a publicar (o moverse y regresar) no reescribe la historia.
+    ahora = new Date("2026-08-25T15:00:00.000Z");
+    store.cambiarEstadoCliente("+51999111222", "construccion");
+    store.cambiarEstadoCliente("+51999111222", "publicado");
+    expect(store.cargarCliente("+51999111222")).toMatchObject({
+      publicadoEn: new Date("2026-08-21T15:00:00.000Z"),
+    });
+  });
+
+  it("las notas se acumulan fechadas y las fichas se ordenan por pipeline", () => {
+    let ahora = new Date("2026-08-21T15:00:00.000Z");
+    const store = new Store(":memory:", () => ahora);
+    stores.push(store);
+    store.crearCliente({
+      e164: "+51999111222",
+      nombreComercial: "Antiguo",
+      plan: "presencia",
+    });
+    store.agregarNotaCliente("+51999111222", "prefiere contacto por la tarde");
+
+    ahora = new Date("2026-08-22T15:00:00.000Z");
+    store.crearCliente({
+      e164: "+51999222333",
+      nombreComercial: "Reciente",
+      plan: "presencia",
+    });
+    store.crearCliente({
+      e164: "+51999333444",
+      nombreComercial: "Cerrado",
+      plan: "presencia",
+    });
+    store.cambiarEstadoCliente("+51999333444", "baja");
+    store.agregarNotaCliente("+51999111222", "mandó fotos parciales");
+    store.agregarNotaCliente("+51999111222", "   ");
+    const ficha = store.cargarCliente("+51999111222");
+    expect(ficha?.notas).toBe(
+      "[2026-08-21] prefiere contacto por la tarde\n[2026-08-22] mandó fotos parciales",
+    );
+    expect(() => store.agregarNotaCliente("+51999999999", "x")).toThrow(
+      "no es cliente",
+    );
+
+    // Activos primero por antigüedad; la baja al final.
+    expect(store.listarClientes().map((c) => c.nombreComercial)).toEqual([
+      "Antiguo",
+      "Reciente",
+      "Cerrado",
+    ]);
+  });
 });
