@@ -74,6 +74,9 @@ npm run campana -- --dry-run --max 3
 # Ver qué conversaciones esperan una respuesta (tuya o del bot)
 npm run bandeja
 
+# El resumen de la mañana: cuenta, bandeja, clientes y embudo
+npm run panel
+
 # Onboarding de un cliente cerrado: ficha, checklist y kickoff
 npm run cliente -- --nuevo +51987654321 --nombre "Clínica Sonrisa" --plan empresa+
 npm run cliente -- --kickoff +51987654321   # imprime el mensaje para pegar
@@ -106,6 +109,7 @@ src/
 ├── llm/            puerto y adaptadores de proveedores
 ├── onboarding/     clientes cerrados: requisitos, progreso y kickoff
 ├── orquestador/    inbound, ráfagas y cola
+├── panel/          resumen diario compuesto sobre los read-models
 ├── prospects/      verticales, discovery y preflight
 ├── sequence/       auditoría, composición, cadencia y visuales opt-in
 └── wa/             Baileys, SQLite, envío y seguridad

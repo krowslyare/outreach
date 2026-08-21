@@ -15,6 +15,7 @@
     "prospectos": "tsx src/cli/prospectos.ts",
     "bandeja": "tsx src/cli/bandeja.ts",
     "cliente": "tsx src/cli/cliente.ts",
+    "panel": "tsx src/cli/panel.ts",
     "test": "vitest run --passWithNoTests",
     "test:watch": "vitest",
     "typecheck": "tsc --noEmit",

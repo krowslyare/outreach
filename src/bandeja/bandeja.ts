@@ -98,3 +98,17 @@ export function resumir(filas: readonly FilaColaAtencion[]): ResumenBandeja {
   for (const fila of filas) porMotivo[fila.motivo] += 1;
   return { total: filas.length, porMotivo };
 }
+
+/**
+ * El desglose como frases cortas ("2 escalada(s), 1 con deuda del bot"), listo
+ * para encabezados. Lo usan la bandeja y el panel; que los dos digan lo mismo
+ * NO es casualidad.
+ */
+export function partesResumen(filas: readonly FilaColaAtencion[]): string[] {
+  const { porMotivo } = resumir(filas);
+  const partes: string[] = [];
+  if (porMotivo.escalado > 0) partes.push(`${porMotivo.escalado} escalada(s)`);
+  if (porMotivo.deuda > 0) partes.push(`${porMotivo.deuda} con deuda del bot`);
+  if (porMotivo.ajeno > 0) partes.push(`${porMotivo.ajeno} fuera de campaña`);
+  return partes;
+}

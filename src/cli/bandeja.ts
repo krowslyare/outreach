@@ -14,7 +14,7 @@ import {
   esperaHumana,
   linkChat,
   ordenarCola,
-  resumir,
+  partesResumen,
   unaLinea,
 } from "../bandeja/bandeja.js";
 
@@ -23,20 +23,15 @@ const LIMITE = 50;
 const store = new Store();
 try {
   const filas = ordenarCola(store.colaAtencion(LIMITE));
-  const resumen = resumir(filas);
 
-  if (resumen.total === 0) {
+  if (filas.length === 0) {
     console.info("Nada pendiente: nadie espera una respuesta.");
     process.exit(0);
   }
 
-  const partes: string[] = [];
-  if (resumen.porMotivo.escalado > 0) partes.push(`${resumen.porMotivo.escalado} escalada(s)`);
-  if (resumen.porMotivo.deuda > 0) partes.push(`${resumen.porMotivo.deuda} con deuda del bot`);
-  if (resumen.porMotivo.ajeno > 0) partes.push(`${resumen.porMotivo.ajeno} fuera de campaña`);
-
   console.info(
-    `Bandeja — ${resumen.total} conversación(es): ${partes.join(" · ")}\n`,
+    `Bandeja — ${filas.length} conversación(es): ` +
+      `${partesResumen(filas).join(" · ")}\n`,
   );
 
   const ahora = new Date();
