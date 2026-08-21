@@ -98,6 +98,34 @@ Una campaña real requiere revisión del dry-run, un número dedicado, sesión
 vinculada, `NUMERO_HUMANO` y aprobación explícita de los prospectos. No se debe
 usar el número comercial ni aumentar volumen antes de validar el circuito.
 
+## Canales
+
+El sistema habla con WhatsApp a través de un solo contrato (`WaClient`), con dos
+implementaciones intercambiables:
+
+- **`baileys`** (default): sesión de WhatsApp Web vinculada por QR. Permite
+  enviar texto libre —es el canal del outreach en frío— al precio de mantener
+  una sesión viva.
+- **`cloud`**: la API oficial de Meta (`CANAL=cloud`). Recibe respuestas por
+  webhook firmado y contesta dentro de la ventana de servicio de 24h, que es
+  gratis. Su límite es estructural: NO puede iniciar conversaciones con texto
+  libre —eso requiere plantillas aprobadas por Meta, no implementado—, así que
+  en este modo `npm run campana` exige `--sin-tanda`. Requiere un número dado
+  de alta en la consola de Meta, token, app secret y un webhook público con
+  HTTPS.
+
+| Tramo | baileys | cloud |
+|---|---|---|
+| Primer toque en frío | sí | no (requiere plantilla) |
+| Follow-up fuera de ventana | sí | no (requiere plantilla) |
+| Contestar dentro de la ventana de 24h | sí | sí |
+| Riesgo de bloqueo del número | alto | bajo |
+| Notificación al `NUMERO_HUMANO` | sí | solo si hay ventana abierta con ese chat |
+
+La notificación de handoff también es saliente iniciado por el sistema: en modo
+cloud falla si el dueño no le escribió al bot dentro de las últimas 24 horas.
+Es una limitación conocida mientras las plantillas no estén implementadas.
+
 ## Estructura
 
 ```text

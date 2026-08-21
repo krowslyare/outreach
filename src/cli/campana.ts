@@ -15,6 +15,7 @@ import { ejecutarTanda } from "../sequence/campaign.js";
 import type { PasoCampana } from "../sequence/compose.js";
 import { cargarVisualesAprobados } from "../sequence/visual.js";
 import { createWaClient, type WaClient } from "../wa/client.js";
+import { canalSeleccionado } from "../wa/cloud-api.js";
 import {
   atenderNumero,
   ingerirInbound,
@@ -228,6 +229,18 @@ function ocultarLogsSensiblesLibsignal(): () => void {
 }
 
 const argumentos = parseArgs(process.argv.slice(2));
+// La API oficial no permite iniciar conversaciones con texto libre: sin
+// plantilla aprobada, cada envío business-initiated rebota en Meta con
+// #131047/#131026. Correr una tanda en ese canal es quemar llamadas contra un
+// muro, así que se exige --sin-tanda y el modo nube queda para lo único que
+// hoy hace bien: contestar dentro de la ventana de 24h. Ver cloud-api.ts.
+if (canalSeleccionado() === "cloud" && !argumentos.sinTanda) {
+  throw new Error(
+    "CANAL=cloud no puede correr una tanda: la API oficial solo permite " +
+      "texto libre DENTRO de la ventana de 24h abierta por el prospecto. " +
+      "Usa --sin-tanda --escuchar para atender respuestas.",
+  );
+}
 if (argumentos.soloFollowUps && !argumentos.sinTanda) {
   console.info(
     "MODO SOLO FOLLOW-UPS: no se abrirán chats nuevos hasta nuevo aviso.",
