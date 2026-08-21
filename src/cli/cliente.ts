@@ -92,11 +92,15 @@ try {
           "empresa+ (empresa_plus), sistemas",
       );
     }
+    // La nota inicial acepta varias palabras SIN comillas, igual que la acción
+    // --nota: valor() devolvería solo el primer token y el resto se perdería
+    // en silencio.
+    const notaInicial = posicionales(args, "nota").slice(1).join(" ");
     store.crearCliente({
       e164,
       nombreComercial: nombre,
       plan,
-      notas: valor(args, "nota"),
+      notas: notaInicial.trim() === "" ? undefined : notaInicial,
     });
     console.info(
       `${nombre} (${e164}) cread@ con plan ${ETIQUETA_PLAN[plan]}. ` +

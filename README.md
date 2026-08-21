@@ -133,14 +133,16 @@ src/
 ├── agent/          conversación, catálogo y guardrails
 ├── bandeja/        cola de atención humana leída de la base local
 ├── evals/          matriz reproducible de conversaciones
+├── handoff/        escalamiento al dueño: lock, aviso y acuse
 ├── harvest/        RENIPRESS y enriquecimiento con Places
 ├── llm/            puerto y adaptadores de proveedores
 ├── onboarding/     clientes cerrados: requisitos, progreso y kickoff
 ├── orquestador/    inbound, ráfagas y cola
 ├── panel/          resumen diario compuesto sobre los read-models
 ├── prospects/      verticales, discovery y preflight
+├── score/          fit para el servicio administrado; puro y testeable
 ├── sequence/       auditoría, composición, cadencia y visuales opt-in
-└── wa/             Baileys, SQLite, envío y seguridad
+└── wa/             canal: Baileys, API oficial, SQLite y seguridad
 ```
 
 Documentación operativa:

@@ -1341,6 +1341,11 @@ export class Store {
            union all
 
            select m.e164 as e164,
+                  -- r.name sin agregar dentro de un GROUP BY es válido en
+                  -- SQLite (columna funcionalmente dependiente del join: todas
+                  -- las filas del grupo traen el mismo nombre). En Postgres
+                  -- esto sería error; acá no lo es, y moverlo a min(r.name)
+                  -- oscurecería el porqué.
                   r.name as nombre,
                   case when r.source_id like 'inbound:%' then 'ajeno' else 'deuda' end as motivo,
                   min(m.created_at) as desde,
