@@ -16,6 +16,8 @@
     "bandeja": "tsx src/cli/bandeja.ts",
     "cliente": "tsx src/cli/cliente.ts",
     "panel": "tsx src/cli/panel.ts",
+    "cuenta": "tsx src/cli/cuenta.ts",
+    "hilo": "tsx src/cli/hilo.ts",
     "test": "vitest run --passWithNoTests",
     "test:watch": "vitest",
     "typecheck": "tsc --noEmit",

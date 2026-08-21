@@ -1751,11 +1751,78 @@ export class Store {
       .prepare(
         `update account_state
          set kill_switch_tripped = 1,
-             kill_switch_reason = ?,
-             kill_switch_at = ?
+         kill_switch_reason = ?,
+         kill_switch_at = ?
          where id = 1`,
       )
       .run(state.reason, state.trippedAt?.toISOString() ?? this.clock().toISOString());
+  }
+
+  /**
+   * Levanta el kill switch. Devuelve true si estaba activo y quedó limpio.
+   *
+   * Es la contraparte que faltaba: el switch se activa solo ante un evento
+   * grave, pero levantarlo es SIEMPRE una decisión humana — por eso no existe
+   * ningún camino automático que llame a este método, y quien lo haga tiene
+   * que haber mirado el motivo antes (npm run cuenta lo imprime).
+   */
+  levantarKillSwitch(): boolean {
+    const resultado = this.db
+      .prepare(
+        `update account_state
+         set kill_switch_tripped = 0, kill_switch_reason = null, kill_switch_at = null
+         where id = 1 and kill_switch_tripped = 1`,
+      )
+      .run();
+    return Number(resultado.changes) > 0;
+  }
+
+  /**
+   * La conversación completa con un número, del primer mensaje al último.
+   *
+   * loadConversacion alimenta al agente con lo mínimo (rol y texto); esto es
+   * la vista HUMANA: incluye timestamps, marca de autorespondedor y el error
+   * de los envíos que fallaron. Es lo que se lee antes de contestar a mano,
+   * no lo que consume el modelo.
+   */
+  transcripcion(e164: string): Array<{
+    direction: "in" | "out";
+    body: string;
+    momento: Date;
+    clase: "humano" | "automatico" | null;
+    ack: number | null;
+    error: string | null;
+  }> {
+    const filas = this.db
+      .prepare(
+        `select direction, body,
+                coalesce(sent_at, created_at) as momento,
+                inbound_class, ack, error
+         from messages
+         where e164 = ?
+         order by created_at asc, id asc`,
+      )
+      .all(e164) as Array<{
+      direction: string;
+      body: string;
+      momento: string;
+      inbound_class: string | null;
+      ack: number | null;
+      error: string | null;
+    }>;
+    return filas.map((fila) => ({
+      direction: fila.direction === "in" ? ("in" as const) : ("out" as const),
+      body: fila.body,
+      momento: new Date(fila.momento),
+      clase:
+        fila.inbound_class === "automatico"
+          ? ("automatico" as const)
+          : fila.inbound_class === "humano"
+            ? ("humano" as const)
+            : null,
+      ack: fila.ack === null ? null : Number(fila.ack),
+      error: fila.error,
+    }));
   }
 
   setBaseline(rate: number): void {

@@ -1227,4 +1227,91 @@ describe("gate de aprobación de prospectos", () => {
       "Cerrado",
     ]);
   });
+
+  it("levantar el kill switch limpia motivo y fecha, y solo la primera vez", () => {
+    const store = new Store(":memory:");
+    stores.push(store);
+    const ahora = new Date("2026-08-21T15:00:00.000Z");
+    store.tripKillSwitch({
+      tripped: true,
+      reason: "loggedOut: prueba",
+      trippedAt: ahora,
+    });
+    expect(store.loadAccountHealth(ahora).killSwitch.tripped).toBe(true);
+
+    expect(store.levantarKillSwitch()).toBe(true);
+    const salud = store.loadAccountHealth(ahora);
+    expect(salud.killSwitch).toMatchObject({
+      tripped: false,
+      reason: null,
+      trippedAt: null,
+    });
+
+    // Segunda pasada: ya no había nada que levantar.
+    expect(store.levantarKillSwitch()).toBe(false);
+  });
+
+  it("la transcripción da el hilo completo con clase, ACK y errores", () => {
+    const t0 = new Date("2026-08-21T14:00:00.000Z");
+    const t1 = new Date("2026-08-21T14:01:00.000Z");
+    const t2 = new Date("2026-08-21T14:02:00.000Z");
+    const t3 = new Date("2026-08-21T14:03:00.000Z");
+    const store = new Store(":memory:", () => t0);
+    stores.push(store);
+    store.importRecipients([scored("A", "+51999111222")]);
+
+    // Salida de campaña fallida + entradas humanas y automáticas mezcladas.
+    const id = store.claimSend("+51999111222", "first", "Hola desde Kurogrid");
+    if (id === null) throw new Error("claim inesperado");
+    store.markError(id, "no hay sesión");
+
+    store.recordInbound("+51999111222", "buenas", t1, {
+      waMessageId: "wa-in-1",
+      clase: "humano",
+    });
+    store.recordInbound(
+      "+51999111222",
+      "en breve lo atendemos",
+      t2,
+      { waMessageId: "wa-in-2", clase: "automatico" },
+    );
+    store.recordOutboundLibre("+51999111222", "Le cuento", "wa-out-2", t3);
+    store.recordAck("wa-out-2", 2, t3);
+
+    expect(store.transcripcion("+51999111222")).toEqual([
+      {
+        direction: "out",
+        body: "Hola desde Kurogrid",
+        momento: t0,
+        clase: null,
+        ack: null,
+        error: "no hay sesión",
+      },
+      {
+        direction: "in",
+        body: "buenas",
+        momento: t1,
+        clase: "humano",
+        ack: null,
+        error: null,
+      },
+      {
+        direction: "in",
+        body: "en breve lo atendemos",
+        momento: t2,
+        clase: "automatico",
+        ack: null,
+        error: null,
+      },
+      {
+        direction: "out",
+        body: "Le cuento",
+        momento: t3,
+        clase: null,
+        ack: 2,
+        error: null,
+      },
+    ]);
+    expect(store.transcripcion("+51999999999")).toEqual([]);
+  });
 });
