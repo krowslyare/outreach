@@ -77,6 +77,13 @@ npm run bandeja
 # El resumen de la mañana: cuenta, bandeja, clientes y embudo
 npm run panel
 
+# Salud de la cuenta y control del kill switch
+npm run cuenta
+npm run cuenta -- --levantar-kill-switch
+
+# La conversación completa con un prospecto, antes de responderle
+npm run hilo +51987654321
+
 # Onboarding de un cliente cerrado: ficha, checklist y kickoff
 npm run cliente -- --nuevo +51987654321 --nombre "Clínica Sonrisa" --plan empresa+
 npm run cliente -- --kickoff +51987654321   # imprime el mensaje para pegar
