@@ -24,6 +24,7 @@
 import { createHmac, timingSafeEqual } from "node:crypto";
 import { createServer, type IncomingMessage, type Server } from "node:http";
 
+import { cuerpoPlantilla, type PlantillaAprobada } from "./plantillas.js";
 import type {
   AckHandler,
   EnvioManualHandler,
@@ -337,6 +338,42 @@ export class ClienteCloudApi implements WaClient {
     return id;
   }
 
+  /**
+   * El único camino legal para iniciar conversación en este canal: una
+   * plantilla aprobada por Meta. La validación de parámetros ocurre acá, antes
+   * de la red; un rechazo de Graph por huecos mal armados no dice cuál fue el
+   * problema, y quien opera no tiene por qué adivinarlo.
+   */
+  async enviarPlantilla(
+    e164: string,
+    plantilla: PlantillaAprobada,
+    valores: readonly string[],
+  ): Promise<string> {
+    const digits = e164.replace(/\D/g, "");
+    if (!/^\d{8,15}$/.test(digits)) {
+      throw new Error(`E.164 inválido: ${e164}`);
+    }
+    const armado = cuerpoPlantilla(plantilla, valores);
+    if (!armado.ok) {
+      throw new Error(`Plantilla "${plantilla.nombre}": ${armado.motivo}`);
+    }
+    const json = await this.llamarGraph("/messages", {
+      messaging_product: "whatsapp",
+      recipient_type: "individual",
+      to: digits,
+      type: "template",
+      template: armado.template,
+    });
+    const id = (json as RespuestaEnvio).messages?.[0]?.id;
+    if (typeof id !== "string") {
+      throw new Error(
+        `La API aceptó la plantilla hacia ${e164} pero no devolvió un id. ` +
+          `El mensaje PUEDE haber salido: revisa antes de reintentar.`,
+      );
+    }
+    return id;
+  }
+
   async sendImage(
     e164: string,
     image: Uint8Array,
@@ -567,4 +604,59 @@ export function mimeTypeDeImagen(image: Uint8Array): string {
   throw new Error(
     "formato de imagen no reconocido: se espera JPEG o PNG (el pipeline de visuales produce JPEG)",
   );
+}
+
+/** La capacidad de plantillas, para quien solo tiene un WaClient en la mano. */
+export interface ClienteConPlantillas {
+  enviarPlantilla(
+    e164: string,
+    plantilla: PlantillaAprobada,
+    valores: readonly string[],
+  ): Promise<string>;
+}
+
+export function esClienteConPlantillas(
+  cliente: unknown,
+): cliente is ClienteConPlantillas {
+  return (
+    typeof (cliente as ClienteConPlantillas).enviarPlantilla === "function"
+  );
+}
+
+/**
+ * El cliente que consume una TANDA en modo nube.
+ *
+ * Los candidatos de una tanda, por construcción, nunca tienen ventana abierta
+ * (`candidatosParaContactar` excluye a todo el que respondió, y solo un
+ * entrante humano abre ventana). O sea: cada texto libre de una tanda rebota
+ * con #131047/#131026. Este envoltorio convierte cada envío en plantilla con
+ * UN parámetro —el texto ya compuesto y auditado—, que es lo único que Meta
+ * acepta ahí fuera.
+ *
+ * La conversación entrante NO pasa por acá: el acuse al prospecto sale por el
+ * cliente directo, porque ese chat SÍ tiene ventana abierta por definición.
+ */
+export function clienteParaTandasEnNube(deps: {
+  cliente: WaClient;
+  plantilla: PlantillaAprobada;
+}): Pick<WaClient, "sendText" | "sendImage"> {
+  if (!esClienteConPlantillas(deps.cliente)) {
+    throw new Error(
+      "clienteParaTandasEnNube requiere el adaptador de la API oficial",
+    );
+  }
+  const conPlantillas = deps.cliente;
+  return {
+    sendText: (e164: string, texto: string) =>
+      conPlantillas.enviarPlantilla(e164, deps.plantilla, [texto]),
+    sendImage: () => {
+      // Una imagen business-initiated también exige plantilla de media
+      // aprobada. No hay camino honesto que la simule con lo que hay hoy.
+      return Promise.reject(
+        new Error(
+          "visuales en modo nube requieren una plantilla de media aprobada; no está implementado",
+        ),
+      );
+    },
+  };
 }

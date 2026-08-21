@@ -15,7 +15,12 @@ import { ejecutarTanda } from "../sequence/campaign.js";
 import type { PasoCampana } from "../sequence/compose.js";
 import { cargarVisualesAprobados } from "../sequence/visual.js";
 import { createWaClient, type WaClient } from "../wa/client.js";
-import { canalSeleccionado } from "../wa/cloud-api.js";
+import {
+  canalSeleccionado,
+  clienteParaTandasEnNube,
+  esClienteConPlantillas,
+} from "../wa/cloud-api.js";
+import { plantillaDesdeEntorno } from "../wa/plantillas.js";
 import {
   atenderNumero,
   ingerirInbound,
@@ -229,16 +234,23 @@ function ocultarLogsSensiblesLibsignal(): () => void {
 }
 
 const argumentos = parseArgs(process.argv.slice(2));
-// La API oficial no permite iniciar conversaciones con texto libre: sin
-// plantilla aprobada, cada envío business-initiated rebota en Meta con
-// #131047/#131026. Correr una tanda en ese canal es quemar llamadas contra un
-// muro, así que se exige --sin-tanda y el modo nube queda para lo único que
-// hoy hace bien: contestar dentro de la ventana de 24h. Ver cloud-api.ts.
-if (canalSeleccionado() === "cloud" && !argumentos.sinTanda) {
+// En modo nube, lo business-initiated solo sale por plantilla aprobada. Sin
+// plantilla de follow-up configurada, una tanda entera rebotaría en Meta con
+// #131047/#131026: se exige la configuración ANTES de abrir WhatsApp en vez de
+// descubrirlo candidato por candidato.
+const canalNube = canalSeleccionado() === "cloud";
+const plantillaFollowup = canalNube
+  ? plantillaDesdeEntorno(process.env, "followup")
+  : undefined;
+const plantillaNotificacion = canalNube
+  ? plantillaDesdeEntorno(process.env, "notificacion")
+  : undefined;
+if (canalNube && !argumentos.sinTanda && plantillaFollowup === undefined) {
   throw new Error(
-    "CANAL=cloud no puede correr una tanda: la API oficial solo permite " +
-      "texto libre DENTRO de la ventana de 24h abierta por el prospecto. " +
-      "Usa --sin-tanda --escuchar para atender respuestas.",
+    "CANAL=cloud sin WHATSAPP_PLANTILLA_FOLLOWUP: la API oficial no " +
+      "permite texto libre fuera de la ventana de 24h. Configura la " +
+      "plantilla utility aprobada en Meta, o corre --sin-tanda para solo " +
+      "atender respuestas.",
   );
 }
 if (argumentos.soloFollowUps && !argumentos.sinTanda) {
@@ -362,10 +374,24 @@ try {
     // Una sola definición para los dos caminos que llaman al agente —el
     // entrante en vivo y el barrido de pendientes— porque si divergen, uno de
     // los dos corre con otras puertas de seguridad y nadie lo nota.
+    //
+    // El aviso de handoff hacia NUMERO_HUMANO es business-initiated: en modo
+    // nube solo sale si hay plantilla de notificación configurada. El acuse al
+    // prospecto NO pasa por acá a propósito —ese chat acaba de escribir, la
+    // ventana está abierta y el texto libre es legal y mejor.
     depsConversacion = (configConversacion = config) => ({
       store,
       proveedor: proveedorAgente,
-      enviar: (destino: string, texto: string) => waActivo.sendText(destino, texto),
+      enviar: async (destino: string, texto: string) => {
+        if (
+          plantillaNotificacion !== undefined &&
+          destino === numeroHumano &&
+          esClienteConPlantillas(waActivo)
+        ) {
+          return waActivo.enviarPlantilla(destino, plantillaNotificacion, [texto]);
+        }
+        return waActivo.sendText(destino, texto);
+      },
       handoff: { numeroHumano },
       config: configConversacion,
       now: () => new Date(),
@@ -432,7 +458,24 @@ try {
       store.tripKillSwitch(hardKill(reason, new Date()));
     });
     await wa.start();
-    client = wa;
+    // En modo nube, la tanda NO habla texto libre: cada envío sale como la
+    // plantilla de follow-up con el texto compuesto como único parámetro. La
+    // conversación entrante sigue usando el cliente directo (ver arriba).
+    client = canalNube && plantillaFollowup !== undefined
+      ? clienteParaTandasEnNube({ cliente: waActivo, plantilla: plantillaFollowup })
+      : wa;
+    if (canalNube) {
+      console.info(
+        plantillaFollowup !== undefined
+          ? `Tanda en nube vía plantilla "${plantillaFollowup.nombre}" (${plantillaFollowup.idioma}).`
+          : "Tanda desactivada: sin plantilla de follow-up configurada.",
+      );
+      console.info(
+        plantillaNotificacion !== undefined
+          ? `Aviso de handoff vía plantilla "${plantillaNotificacion.nombre}".`
+          : "Aviso de handoff por texto libre: fallará si no hay ventana abierta con tu chat.",
+      );
+    }
   }
 
   const resumen = argumentos.sinTanda

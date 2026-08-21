@@ -7,12 +7,14 @@ import {
   ACK_DESDE_ESTADO,
   ClienteCloudApi,
   canalSeleccionado,
+  clienteParaTandasEnNube,
   configDesdeEntorno,
   eventoDesdeWebhook,
   mimeTypeDeImagen,
   verificarFirma,
   type ConfigCloudApi,
 } from "./cloud-api.js";
+import type { PlantillaAprobada } from "./plantillas.js";
 
 const CFG: ConfigCloudApi = {
   token: "token-de-prueba",
@@ -294,6 +296,68 @@ describe("ClienteCloudApi", () => {
     const cliente = clienteConFetch([]);
     await expect(cliente.getBusinessProfile("+51999111222")).rejects.toThrow(
       /no existe en la API oficial/,
+    );
+  });
+
+  it("enviarPlantilla manda type:template y valida los parámetros antes de la red", async () => {
+    const capturas: Array<{ url: string; init?: RequestInit }> = [];
+    const cliente = clienteConFetch(
+      [respuestaJson(200, { messages: [{ id: "wamid.TPL1" }] })],
+      capturas,
+    );
+    const plantilla: PlantillaAprobada = {
+      nombre: "kurogrid_followup",
+      idioma: "es",
+      parametros: 1,
+    };
+
+    const id = await cliente.enviarPlantilla("+51999111222", plantilla, [
+      "retomo mi mensaje de ayer",
+    ]);
+
+    expect(id).toBe("wamid.TPL1");
+    const cuerpo = JSON.parse(String(capturas[0]?.init?.body));
+    expect(cuerpo.type).toBe("template");
+    expect(cuerpo.template).toEqual({
+      name: "kurogrid_followup",
+      language: { code: "es" },
+      components: [
+        { type: "body", parameters: [{ type: "text", text: "retomo mi mensaje de ayer" }] },
+      ],
+    });
+
+    // Un parámetro de más o vacío no debe llegar a Graph jamás.
+    await expect(
+      cliente.enviarPlantilla("+51999111222", plantilla, []),
+    ).rejects.toThrow(/espera 1 parámetro/);
+    await expect(
+      cliente.enviarPlantilla("+51999111222", plantilla, ["   "]),
+    ).rejects.toThrow(/parámetro vacío/);
+    expect(capturas).toHaveLength(1);
+  });
+
+  it("clienteParaTandasEnNube convierte cada sendText en plantilla", async () => {
+    const capturas: Array<{ url: string; init?: RequestInit }> = [];
+    const cliente = clienteConFetch(
+      [respuestaJson(200, { messages: [{ id: "wamid.FU1" }] })],
+      capturas,
+    );
+    const tanda = clienteParaTandasEnNube({
+      cliente,
+      plantilla: { nombre: "kurogrid_followup", idioma: "es", parametros: 1 },
+    });
+
+    const id = await tanda.sendText("+51999111222", "texto compuesto y auditado");
+
+    expect(id).toBe("wamid.FU1");
+    const cuerpo = JSON.parse(String(capturas[0]?.init?.body));
+    expect(cuerpo.template.components[0].parameters[0].text).toBe(
+      "texto compuesto y auditado",
+    );
+
+    // Y lo que no existe en nube sin plantilla de media, se dice de una.
+    await expect(tanda.sendImage("+51999111222", new Uint8Array([1]), "x")).rejects.toThrow(
+      /plantilla de media/,
     );
   });
 
