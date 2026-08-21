@@ -256,6 +256,31 @@ Decisiones:
   (destino de consultas en Empresa, datos del Libro de Reclamaciones en
   Empresa +, flujos en Sistemas).
 
+## Plantillas en el canal oficial — 2026-08-21
+
+La API oficial no permite texto libre business-initiated: sin plantilla
+aprobada, todo envío fuera de ventana rebota (#131047/#131026). El ruteo quedó
+así:
+
+- **Tanda en modo nube = 100% plantilla.** Los candidatos de una tanda nunca
+  tienen ventana abierta (`candidatosParaContactar` excluye a quien respondió,
+  y solo un entrante humano abre ventana), así que no hay caso intermedio que
+  decidir: cada sendText de tanda sale como `WHATSAPP_PLANTILLA_FOLLOWUP` con
+  el texto ya compuesto y auditado como único parámetro {{1}}. La composición
+  con LLM sigue mandando: lo que Meta aprueba es el ESQUELETO; el contenido
+  personalizado viaja dentro del hueco.
+- **Aviso de handoff** = `WHATSAPP_PLANTILLA_NOTIFICACION` con el resumen del
+  lead como {{1}}. Cierra la limitación documentada del PR anterior.
+- **Acuse al prospecto NO va por plantilla**: ese chat acaba de escribir, la
+  ventana está abierta, y texto libre es gratis y mejor.
+- **Sin fallback silencioso.** Sin plantilla configurada, campana rechaza la
+  tanda al arrancar con el motivo claro; no se descubre candidato por candidato
+  contra los errores genéricos de Graph.
+
+Categoría utility, no marketing: los follow-ups son recordatorios de una
+conversación real, y utility es más barata y menos vigilada por la quality
+rating.
+
 ## Fuentes
 
 - **Google Places** (Text Search, field mask) — opera, teléfono, sin web, reseñas.

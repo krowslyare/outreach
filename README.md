@@ -108,23 +108,24 @@ implementaciones intercambiables:
   una sesión viva.
 - **`cloud`**: la API oficial de Meta (`CANAL=cloud`). Recibe respuestas por
   webhook firmado y contesta dentro de la ventana de servicio de 24h, que es
-  gratis. Su límite es estructural: NO puede iniciar conversaciones con texto
-  libre —eso requiere plantillas aprobadas por Meta, no implementado—, así que
-  en este modo `npm run campana` exige `--sin-tanda`. Requiere un número dado
-  de alta en la consola de Meta, token, app secret y un webhook público con
-  HTTPS.
+  gratis. Lo business-initiated sale por **plantillas utility aprobadas en
+  Meta** (`WHATSAPP_PLANTILLA_FOLLOWUP` para follow-ups de tanda,
+  `WHATSAPP_PLANTILLA_NOTIFICACION` para el aviso de handoff; cada una con un
+  hueco `{{1}}`). Sin plantilla de follow-up configurada, `campana` rechaza
+  correr tandas en ese modo. Requiere un número dado de alta en la consola de
+  Meta, token, app secret y un webhook público con HTTPS.
 
 | Tramo | baileys | cloud |
 |---|---|---|
-| Primer toque en frío | sí | no (requiere plantilla) |
-| Follow-up fuera de ventana | sí | no (requiere plantilla) |
+| Primer toque en frío | sí | no (requiere plantilla de marketing) |
+| Follow-up fuera de ventana | sí | sí, vía plantilla utility |
 | Contestar dentro de la ventana de 24h | sí | sí |
 | Riesgo de bloqueo del número | alto | bajo |
-| Notificación al `NUMERO_HUMANO` | sí | solo si hay ventana abierta con ese chat |
+| Notificación al `NUMERO_HUMANO` | sí | sí, vía plantilla (o texto si hay ventana abierta) |
 
-La notificación de handoff también es saliente iniciado por el sistema: en modo
-cloud falla si el dueño no le escribió al bot dentro de las últimas 24 horas.
-Es una limitación conocida mientras las plantillas no estén implementadas.
+El primer toque en frío sigue siendo territorio de Baileys: exige una plantilla
+de marketing aprobada y pagada por entrega, y su calidad es lo que decide la
+composición personalizada.
 
 ## Estructura
 
