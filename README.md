@@ -84,6 +84,10 @@ npm run cuenta -- --levantar-kill-switch
 # La conversación completa con un prospecto, antes de responderle
 npm run hilo +51987654321
 
+# El tablero en el navegador (solo localhost): bandeja clicable,
+# checklist de clientes y panel con refresco automático
+npm run tablero
+
 # Onboarding de un cliente cerrado: ficha, checklist y kickoff
 npm run cliente -- --nuevo +51987654321 --nombre "Clínica Sonrisa" --plan empresa+
 npm run cliente -- --kickoff +51987654321   # imprime el mensaje para pegar
@@ -150,6 +154,7 @@ src/
 ├── prospects/      verticales, discovery y preflight
 ├── score/          fit para el servicio administrado; puro y testeable
 ├── sequence/       auditoría, composición, cadencia y visuales opt-in
+├── tablero/        UI local: página y read-models en JSON
 └── wa/             canal: Baileys, API oficial, SQLite y seguridad
 ```
 

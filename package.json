@@ -18,6 +18,7 @@
     "panel": "tsx src/cli/panel.ts",
     "cuenta": "tsx src/cli/cuenta.ts",
     "hilo": "tsx src/cli/hilo.ts",
+    "tablero": "tsx src/cli/tablero.ts",
     "test": "vitest run --passWithNoTests",
     "test:watch": "vitest",
     "typecheck": "tsc --noEmit",
