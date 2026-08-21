@@ -4,8 +4,8 @@
 //
 // Responde una sola pregunta: ¿a quién le debo una respuesta? No abre WhatsApp
 // ni llama a ningún proveedor: lee la base local y imprime. Sirve igual con el
-// proceso apagado o con el número baneado, que es justo cuando más falta hace
-// saber qué conversaciones quedaron colgando.
+// proceso apagado o con el canal temporalmente bloqueado, que es justo cuando
+// más falta hace saber qué conversaciones quedaron colgando.
 
 import { Store } from "../wa/store.js";
 import {

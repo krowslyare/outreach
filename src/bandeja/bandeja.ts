@@ -5,7 +5,7 @@
 // quedaron debiéndose y números ajenos a la campaña que escribieron igual.
 //
 // Es un read-model puro sobre las filas del store: no llama a WhatsApp ni al
-// LLM, así que funciona con el número baneado, con el proceso apagado o desde
+// LLM, así que funciona con el canal bloqueado, con el proceso apagado o desde
 // una copia de la base. Eso es a propósito: la deuda con un prospecto no
 // desaparece porque el canal esté caído.
 
