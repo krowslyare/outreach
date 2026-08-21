@@ -154,6 +154,15 @@ Documentación operativa:
 - [`VISUAL_OUTREACH.md`](VISUAL_OUTREACH.md): manifiestos y QA de imágenes
   opt-in.
 
+## Flujo de trabajo
+
+Un PR por feature, con CI obligatorio: typecheck más la suite offline completa
+antes de cualquier merge. La revisión entre personas es opcional y a criterio
+del autor — es un sistema de riesgo bajo, donde el peor caso conocido es un
+mensaje duplicado a un cliente. El peso de la garantía está en las pruebas:
+los caminos donde un bug cuesta caro (kill switch, opt-out, idempotencia,
+puertas de seguridad) son los que tienen mayor cobertura.
+
 ## Datos y seguridad
 
 `.env`, la sesión de Baileys, SQLite, cachés, prospectos importados y visuales
