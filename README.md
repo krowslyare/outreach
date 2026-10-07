@@ -1,5 +1,13 @@
 # Kurogrid Outreach
 
+A local tool for keeping prospect review, WhatsApp conversations, and human
+handoff in one place. AI helps with messages and incoming replies; a person
+reviews potential clients before contact, and code controls when sending is allowed.
+
+**Status:** a local prototype still being refined. The automated checks run
+without API keys or a WhatsApp session. Live messaging needs configuration and
+explicit approval.
+
 Pipeline local de prospección y conversación controlada por WhatsApp para
 Kurogrid. El proyecto conecta descubrimiento, revisión humana, composición de
 mensajes, cadencia, recepción de respuestas y handoff a una persona.
@@ -170,8 +178,7 @@ Documentación operativa:
 
 Un PR por feature, con CI obligatorio: typecheck más la suite offline completa
 antes de cualquier merge. La revisión entre personas es opcional y a criterio
-del autor — es un sistema de riesgo bajo, donde el peor caso conocido es un
-mensaje duplicado a un cliente. El peso de la garantía está en las pruebas:
+del autor. El peso de la garantía está en las pruebas:
 los caminos donde un bug cuesta caro (kill switch, opt-out, idempotencia,
 puertas de seguridad) son los que tienen mayor cobertura.
 
